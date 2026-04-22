@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+
+frames/
+out/
+dist/
+
+*.mp4
+*.webm
+*.zip
+
+.DS_Store
+Thumbs.db
