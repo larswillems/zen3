@@ -163,6 +163,7 @@ function makeScoreBin(overrides = {}) {
     color: '#38bdf8',
     textColor: '#ffffff',
     captureMode: 'consume', // 'consume' | 'freeze' | 'keep' | 'settle'
+    scoreTrigger: 'top',    // for settle bins: 'top' (entry) | 'bottom' (settled)
     ...overrides,
   };
 }

@@ -76,6 +76,7 @@ class Physics {
     this.worldH = WORLD_H;
     this.events = []; // collision/destroy/escape events for particles, etc.
     this._debugCollisionCount = 0;
+    this._debugSpawnerCount = 0;
   }
 
   _collisionDebugOptions() {
@@ -114,6 +115,43 @@ class Physics {
       if (this._debugCollisionCount === opts.maxLogs && typeof console.warn === 'function') {
         console.warn(`[physics] collision debug log limit reached (${opts.maxLogs}). Set window.__collisionDebug = { maxLogs: N } to capture more.`);
       }
+    }
+  }
+
+  _spawnerDebugOptions() {
+    const fallback = { enabled: false, maxLogs: 240, toConsole: true };
+    if (typeof window === 'undefined') return fallback;
+    const user = window.__spawnerDebug;
+    if (user === false || user == null) return fallback;
+    if (user === true) return { ...fallback, enabled: true };
+    return {
+      enabled: user.enabled !== false,
+      maxLogs: Math.max(0, user.maxLogs != null ? user.maxLogs : fallback.maxLogs),
+      toConsole: user.toConsole !== false,
+    };
+  }
+
+  _debugSpawner(kind, payload) {
+    const opts = this._spawnerDebugOptions();
+    if (!opts.enabled) return;
+    if (this._debugSpawnerCount >= opts.maxLogs) return;
+    this._debugSpawnerCount++;
+    const entry = {
+      idx: this._debugSpawnerCount,
+      kind,
+      elapsedTime: Number((((payload && payload.elapsedTime) || 0)).toFixed(4)),
+      loopTime: Number((((payload && payload.loopTime) || 0)).toFixed(4)),
+      ...payload,
+    };
+    if (typeof window !== 'undefined') {
+      if (!Array.isArray(window.__spawnerDebugLogs)) window.__spawnerDebugLogs = [];
+      window.__spawnerDebugLogs.push(entry);
+      if (window.__spawnerDebugLogs.length > opts.maxLogs) {
+        window.__spawnerDebugLogs.splice(0, window.__spawnerDebugLogs.length - opts.maxLogs);
+      }
+    }
+    if (opts.toConsole && typeof console !== 'undefined' && typeof console.info === 'function') {
+      console.info('[spawner]', entry);
     }
   }
 
@@ -216,7 +254,9 @@ class Physics {
     ball.fixed = true;
     ball._captured = true;
     if (ball.clearTrailOnDeath && ball._trail) ball._trail.length = 0;
-    this._awardScoreBin(ball, bin, state);
+    if ((bin.scoreTrigger || 'top') === 'bottom') {
+      this._awardScoreBin(ball, bin, state);
+    }
     return true;
   }
 
@@ -242,6 +282,12 @@ class Physics {
       ball._scoreBinContact[key] = true;
       const captureMode = bin.captureMode || 'consume';
       if (captureMode === 'settle') {
+        // `scoreTrigger` lets the user decide whether a settle-bin scores when
+        // the ball crosses the top lip ("top") or only after it reaches the
+        // bottom and comes to rest ("bottom").
+        if ((bin.scoreTrigger || 'top') !== 'bottom') {
+          this._awardScoreBin(ball, bin, state);
+        }
         ball._capturedBin = bin;
         ball._captured = true;
         ball.vx *= 0.35;
@@ -531,7 +577,13 @@ class Physics {
   // Deterministic O(n^2) pair pass. Fine for scenes with <200 balls and
   // simple enough that floating-point behaviour is reproducible across runs.
   _resolveBallBall(balls) {
-    const alive = balls.filter((b) => b.alive);
+    // Balls that have already been captured by a score bin no longer need
+    // expensive ball-ball collision resolution. Letting a whole bucket full of
+    // captured balls continue colliding creates an O(n^2) hotspot and can
+    // freeze the tab in Plinko-style scenes. Once a ball is inside a pot we let
+    // the score-bin logic animate/settle it, but we remove it from the global
+    // collision solver entirely.
+    const alive = balls.filter((b) => b.alive && !b._capturedBin && !b._captured);
     for (let i = 0; i < alive.length; i++) {
       for (let j = i + 1; j < alive.length; j++) {
         const A = alive[i], B = alive[j];
@@ -687,8 +739,21 @@ class Physics {
       sp._spawnCount = 0;
       sp._spawnedIds = [];
     }
+    // IMPORTANT: schedule spawns off monotonic elapsed time, not looped
+    // `state.time`. `state.time` wraps back to 0 every loop, which can make a
+    // spawner's nextSpawnTime permanently unreachable after the first wrap.
+    const elapsedTime = state.elapsedTime != null ? state.elapsedTime : state.time;
     const nextSpawnTime = sp._lastSpawn + interval;
-    if (state.time + dt < nextSpawnTime) return;
+    if (elapsedTime + dt < nextSpawnTime) {
+      this._debugSpawner('wait', {
+        spawnerId: sp.id,
+        elapsedTime,
+        loopTime: state.time,
+        nextSpawnTime: Number(nextSpawnTime.toFixed(4)),
+        interval: Number(interval.toFixed(4)),
+      });
+      return;
+    }
 
     // Emit the ball. Optional spawn jitter uses a deterministic sine hash so
     // presets can get "random-looking" variety without breaking seed replay.
@@ -755,13 +820,33 @@ class Physics {
     sp._spawnCount++;
     sp._lastSpawn = nextSpawnTime;
     this.events.push({ type: 'spawn', x: sp.x, y: sp.y, color });
+    this._debugSpawner('spawn', {
+      spawnerId: sp.id,
+      elapsedTime,
+      loopTime: state.time,
+      nextSpawnTime: Number(nextSpawnTime.toFixed(4)),
+      spawnCount: sp._spawnCount,
+      trackedBalls: sp._spawnedIds.length,
+      maxBalls: sp.maxBalls,
+      ballId: ball.id,
+    });
 
     // Cap active balls: oldest spawned by THIS spawner is removed first.
     const max = Math.max(1, sp.maxBalls | 0);
     while (sp._spawnedIds.length > max) {
       const oldestId = sp._spawnedIds.shift();
       const idx = state.objects.findIndex((o) => o.id === oldestId);
-      if (idx >= 0) state.objects.splice(idx, 1);
+      if (idx >= 0) {
+        state.objects.splice(idx, 1);
+        this._debugSpawner('trim', {
+          spawnerId: sp.id,
+          elapsedTime,
+          loopTime: state.time,
+          removedBallId: oldestId,
+          trackedBalls: sp._spawnedIds.length,
+          maxBalls: max,
+        });
+      }
     }
   }
 

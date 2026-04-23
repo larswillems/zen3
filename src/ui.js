@@ -2916,6 +2916,17 @@ function propertySchema(objOrType) {
           { value: 'keep', label: 'Keep moving' },
           { value: 'settle', label: 'Settle at bottom' },
         ] },
+        ...(obj && obj.captureMode === 'settle'
+          ? [{
+              key: 'scoreTrigger',
+              label: 'Count at',
+              type: 'select',
+              options: [
+                { value: 'top', label: 'Top / entry' },
+                { value: 'bottom', label: 'Bottom / settled' },
+              ],
+            }]
+          : []),
       ];
     case 'circle':
       return [
