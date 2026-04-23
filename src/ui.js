@@ -148,9 +148,48 @@ class UI {
 
     const speedSlider = document.getElementById('speed-slider');
     const speedLabel = document.getElementById('speed-label');
-    speedSlider.addEventListener('input', () => {
-      this.app.speedMultiplier = parseFloat(speedSlider.value);
-      speedLabel.textContent = `${this.app.speedMultiplier.toFixed(2)}x`;
+    const applySpeedValue = (raw) => {
+      const min = parseFloat(speedSlider.min || '0.25');
+      const max = parseFloat(speedSlider.max || '200');
+      const parsed = parseFloat(String(raw).replace(/x$/i, '').trim());
+      if (Number.isNaN(parsed)) {
+        speedLabel.textContent = `${this.app.speedMultiplier.toFixed(2)}x`;
+        return false;
+      }
+      const clamped = Math.max(min, Math.min(max, parsed));
+      this.app.speedMultiplier = clamped;
+      speedSlider.value = String(clamped);
+      speedLabel.textContent = `${clamped.toFixed(2)}x`;
+      return true;
+    };
+    speedSlider.addEventListener('input', () => applySpeedValue(speedSlider.value));
+    speedLabel.title = 'Double-click to edit speed';
+    speedLabel.addEventListener('dblclick', () => {
+      if (speedLabel.querySelector('input')) return;
+      const editor = document.createElement('input');
+      editor.type = 'text';
+      editor.value = this.app.speedMultiplier.toFixed(2);
+      editor.className = 'readout-editor';
+      editor.setAttribute('aria-label', 'Playback speed');
+      const finish = (commit) => {
+        if (!editor.isConnected) return;
+        if (commit) applySpeedValue(editor.value);
+        else speedLabel.textContent = `${this.app.speedMultiplier.toFixed(2)}x`;
+      };
+      editor.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          finish(true);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          finish(false);
+        }
+      });
+      editor.addEventListener('blur', () => finish(true));
+      speedLabel.textContent = '';
+      speedLabel.appendChild(editor);
+      editor.focus();
+      editor.select();
     });
 
     // Seed field.
