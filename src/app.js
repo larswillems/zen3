@@ -84,12 +84,9 @@ class App {
         // in real-time. The engine silently no-ops if it hasn't been unlocked
         // by a user gesture yet.
         this.audio.handleEvents(evs, this.canvas.width, this.canvas.height);
-        const hasFinishEvent = typeof window.scenarioHasFinishEvent === 'function'
-          ? window.scenarioHasFinishEvent(this.simulator.scenario)
-          : true;
         const ec = this.simulator.scenario.endCondition || null;
         const activeBalls = this._activeBallCount();
-        if (this.simulator.scenario.stopOnFirstEscape && hasFinishEvent && evs.some((e) => e.type === 'escape')) {
+        if (this.simulator.scenario.stopOnFirstEscape && evs.some((e) => e.type === 'escape')) {
           this.pause();
           this._accumulator = 0;
         } else if (ec && ec.type === 'bucketHitTail'

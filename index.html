@@ -128,22 +128,27 @@
       <div class="add-grid">
         <button data-add="text">Text</button>
         <button data-add="timer">Timer</button>
+        <button id="btn-add-counter">Counter</button>
+        <button id="btn-add-score">Score</button>
+        <button id="btn-add-countdown">Countdown</button>
       </div>
-      <div class="prop-row">
-        <label><input id="ov-timer" type="checkbox" /> Show timer</label>
-      </div>
-      <div class="prop-row">
-        <label><input id="ov-counter" type="checkbox" /> Show counter</label>
-      </div>
-      <div class="prop-row">
-        <label><input id="ov-score" type="checkbox" /> Show score</label>
-      </div>
-      <div class="prop-row">
-        <label><input id="ov-countdown" type="checkbox" /> Big countdown</label>
-      </div>
-      <div class="prop-row">
-        <label>Countdown max</label>
-        <input id="ov-countdown-max" type="number" min="1" max="60" step="1" value="4" />
+      <div hidden>
+        <div class="prop-row">
+          <label><input id="ov-timer" type="checkbox" /> Show timer</label>
+        </div>
+        <div class="prop-row">
+          <label><input id="ov-counter" type="checkbox" /> Show counter</label>
+        </div>
+        <div class="prop-row">
+          <label><input id="ov-score" type="checkbox" /> Show score</label>
+        </div>
+        <div class="prop-row">
+          <label><input id="ov-countdown" type="checkbox" /> Big countdown</label>
+        </div>
+        <div class="prop-row">
+          <label>Countdown max</label>
+          <input id="ov-countdown-max" type="number" min="1" max="60" step="1" value="4" />
+        </div>
       </div>
 
       <h2>Finish</h2>

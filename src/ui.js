@@ -393,6 +393,27 @@ class UI {
       this._commit();
     });
 
+    const enableOverlay = (patch) => {
+      Object.assign(this.app.simulator.scenario.overlay, patch);
+      this.refreshScenarioPanel();
+      this._commit();
+    };
+    const counterBtn = document.getElementById('btn-add-counter');
+    if (counterBtn) {
+      counterBtn.addEventListener('click', () => enableOverlay({ showCounter: true }));
+    }
+    const scoreBtn = document.getElementById('btn-add-score');
+    if (scoreBtn) {
+      scoreBtn.addEventListener('click', () => enableOverlay({ showScore: true }));
+    }
+    const countdownBtn = document.getElementById('btn-add-countdown');
+    if (countdownBtn) {
+      countdownBtn.addEventListener('click', () => enableOverlay({
+        bigCountdown: true,
+        countdownMax: this.app.simulator.scenario.overlay.countdownMax || 4,
+      }));
+    }
+
     // Overlay toggles.
     document.getElementById('ov-title').addEventListener('change', (e) => {
       this.app.simulator.scenario.overlay.title = e.target.value;
@@ -559,7 +580,10 @@ class UI {
       // hard length: presets have their own `endCondition` that decides
       // when to stop (e.g. firstEscape + 3.5s for the 1 HP preset).
       const v = parseFloat(e.target.value);
-      if (!Number.isNaN(v) && v > 0) {
+      if (e.target.value.trim() === '') {
+        this.app.simulator.scenario.disableExportHardCap = true;
+      } else if (!Number.isNaN(v) && v > 0) {
+        this.app.simulator.scenario.disableExportHardCap = false;
         this.app.simulator.scenario.duration = v;
         this.app.simulator.scenario.maxExportSeconds = v;
       }
@@ -805,17 +829,15 @@ class UI {
 
     const dt = window.PHYSICS_CONST.FIXED_DT;
     const ec = sim.scenario.endCondition || null;
-    const hardCapSeconds = Math.min(120, Math.max(
-      2, Number(sim.scenario.maxExportSeconds) || Number(sim.scenario.duration) || 30
-    ));
+    const hardCapSeconds = sim.scenario.disableExportHardCap
+      ? 120
+      : Math.min(120, Math.max(
+          2, Number(sim.scenario.maxExportSeconds) || Number(sim.scenario.duration) || 30
+        ));
     const hardCapSteps = Math.ceil(hardCapSeconds / dt);
     const fallbackSec = sim.scenario.satisfying
       ? (sim.scenario.loopDuration || 10)
       : (sim.scenario.duration || 12);
-    const hasFinishEvent = typeof window.scenarioHasFinishEvent === 'function'
-      ? window.scenarioHasFinishEvent(sim.scenario)
-      : true;
-
     const stepLimitFor = (seconds) => Math.ceil(Math.max(0.1, seconds) / dt);
     const fixedSteps = stepLimitFor(fallbackSec);
     const tailSteps = stepLimitFor(ec && ec.tail != null ? ec.tail : 1.0);
@@ -888,7 +910,7 @@ class UI {
       // not keep simulating extra tail time for seed analysis, otherwise the
       // finder counts additional spawned/frozen balls the user never actually
       // sees in the live run.
-      if (sim.scenario.stopOnFirstEscape && hasFinishEvent && evs.some((e) => e.type === 'escape')) {
+      if (sim.scenario.stopOnFirstEscape && evs.some((e) => e.type === 'escape')) {
         completed = true;
         break;
       }
@@ -936,7 +958,7 @@ class UI {
       ? sim.scenario.melody.notes.length
       : 0;
     const melodyBounceDelta = melodyTarget > 0 ? melodyHitCount - melodyTarget : 0;
-    const goalReached = (sim.scenario.stopOnFirstEscape && hasFinishEvent)
+    const goalReached = (sim.scenario.stopOnFirstEscape)
       ? firstEscapeAt >= 0
       : (ec && ec.type === 'firstEscapeTail')
         ? firstEscapeAt >= 0
@@ -1616,16 +1638,277 @@ class UI {
     const list = document.getElementById('events-list');
     list.innerHTML = '';
     const rules = this.app.simulator.scenario.events || [];
-    if (rules.length === 0) {
+    const systemRules = this._deriveSystemEventCards();
+    for (const rule of systemRules) {
+      list.appendChild(this._makeSystemEventCard(rule));
+    }
+    const systemAdd = this._makeSystemRuleAddRow();
+    if (systemAdd) list.appendChild(systemAdd);
+    if (rules.length === 0 && systemRules.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'hint small';
       empty.textContent = 'No rules. Add one to react to escapes, destructions, time, etc.';
       list.appendChild(empty);
-      return;
     }
     for (const rule of rules) {
       list.appendChild(this._makeEventRuleCard(rule));
     }
+  }
+
+  _deriveSystemEventCards() {
+    const sc = this.app.simulator.scenario || {};
+    const cards = [];
+    if (sc.endCondition) cards.push({ kind: 'endCondition', ec: sc.endCondition });
+    if (!sc.disableExportHardCap) {
+      cards.push({ kind: 'hardCap', seconds: Number(sc.maxExportSeconds) || Number(sc.duration) || 20 });
+    }
+    if (sc.stopOnFirstEscape) cards.push({ kind: 'liveStop', enabled: true });
+    return cards;
+  }
+
+  _makeSystemEventCard(rule) {
+    const card = document.createElement('div');
+    card.className = 'event-card system-event-card';
+
+    const badgeRow = document.createElement('div');
+    badgeRow.className = 'event-system-header';
+    const badge = document.createElement('span');
+    badge.className = 'event-system-badge';
+    badge.textContent = 'SYSTEM';
+    const note = document.createElement('span');
+    note.className = 'tiny';
+    note.textContent = 'editable preset rule';
+    badgeRow.appendChild(badge);
+    badgeRow.appendChild(note);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'mini';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', () => {
+      const sc = this.app.simulator.scenario;
+      if (rule.kind === 'endCondition') sc.endCondition = null;
+      else if (rule.kind === 'hardCap') {
+        sc.disableExportHardCap = true;
+        sc.maxExportSeconds = null;
+      } else if (rule.kind === 'liveStop') sc.stopOnFirstEscape = false;
+      this._refreshSystemRulesAfterEdit();
+    });
+    badgeRow.appendChild(remove);
+    card.appendChild(badgeRow);
+    if (rule.kind === 'endCondition') this._fillSystemEndConditionCard(card, rule.ec);
+    else if (rule.kind === 'hardCap') this._fillSystemHardCapCard(card, rule.seconds);
+    else if (rule.kind === 'liveStop') this._fillSystemLiveStopCard(card, rule.enabled);
+    return card;
+  }
+
+  _makeSystemRuleAddRow() {
+    const sc = this.app.simulator.scenario || {};
+    const row = document.createElement('div');
+    row.className = 'system-rule-actions';
+    let count = 0;
+    const addButton = (label, onClick) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mini';
+      btn.textContent = label;
+      btn.addEventListener('click', onClick);
+      row.appendChild(btn);
+      count++;
+    };
+    if (!sc.endCondition) {
+      addButton('+ End rule', () => {
+        sc.endCondition = { type: 'loopDuration' };
+        this._refreshSystemRulesAfterEdit();
+      });
+    }
+    if (sc.disableExportHardCap) {
+      addButton('+ Hard cap', () => {
+        sc.disableExportHardCap = false;
+        sc.maxExportSeconds = Number(sc.duration) || Number(sc.loopDuration) || 20;
+        this._refreshSystemRulesAfterEdit();
+      });
+    }
+    if (!sc.stopOnFirstEscape) {
+      addButton('+ Live stop', () => {
+        sc.stopOnFirstEscape = true;
+        this._refreshSystemRulesAfterEdit();
+      });
+    }
+    return count > 0 ? row : null;
+  }
+
+  _refreshSystemRulesAfterEdit() {
+    this.refreshEvents();
+    this.refreshScenarioPanel();
+    this._commit();
+  }
+
+  _makeSystemStaticRow(labelText, valueText, muted = false) {
+    const row = document.createElement('div');
+    row.className = 'event-row';
+    row.appendChild(this._tinyLabel(labelText));
+    const text = document.createElement('div');
+    text.className = `event-static${muted ? ' muted' : ''}`;
+    text.textContent = valueText;
+    row.appendChild(text);
+    return row;
+  }
+
+  _makeSystemTextInput(value, onCommit, { placeholder = '', type = 'text', step = null, min = null, max = null } = {}) {
+    const input = document.createElement('input');
+    input.type = type;
+    input.value = value != null ? String(value) : '';
+    if (placeholder) input.placeholder = placeholder;
+    if (step != null) input.step = String(step);
+    if (min != null) input.min = String(min);
+    if (max != null) input.max = String(max);
+    const commit = () => onCommit(input.value);
+    input.addEventListener('change', commit);
+    input.addEventListener('blur', commit);
+    return input;
+  }
+
+  _makeSystemSelect(options, currentValue, onChange) {
+    const sel = document.createElement('select');
+    for (const optDef of options) {
+      const opt = document.createElement('option');
+      opt.value = optDef.value;
+      opt.textContent = optDef.label;
+      if (String(opt.value) === String(currentValue)) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', () => onChange(sel.value));
+    return sel;
+  }
+
+  _makeSystemToggle(text, checked, onChange) {
+    const label = document.createElement('label');
+    label.className = 'event-toggle';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = !!checked;
+    box.addEventListener('change', () => onChange(box.checked));
+    label.appendChild(box);
+    label.appendChild(document.createTextNode(text));
+    return label;
+  }
+
+  _fillSystemEndConditionCard(card, ec) {
+    const sc = this.app.simulator.scenario;
+    const endCondition = sc.endCondition || (sc.endCondition = { type: 'loopDuration' });
+    const whenRow = document.createElement('div');
+    whenRow.className = 'event-row';
+    whenRow.appendChild(this._tinyLabel('When'));
+    whenRow.appendChild(this._makeSystemSelect([
+      { value: 'loopDuration', label: 'Loop duration completes' },
+      { value: 'fixed', label: 'Time reaches N seconds' },
+      { value: 'firstEscapeTail', label: 'First ball escapes' },
+      { value: 'allBallsGone', label: 'All balls are gone' },
+      { value: 'ballCountTail', label: 'Ball count drops to N' },
+      { value: 'bucketHitTail', label: 'Specific bucket is hit' },
+    ], endCondition.type || 'loopDuration', (value) => {
+      const next = { type: value };
+      if (value === 'fixed') next.seconds = Number(sc.duration) || Number(sc.loopDuration) || 20;
+      if (value === 'firstEscapeTail') next.tail = 2.5;
+      if (value === 'allBallsGone') next.tail = 1.0;
+      if (value === 'ballCountTail') { next.count = 1; next.tail = 1.0; }
+      if (value === 'bucketHitTail') { next.bucketId = 'bin_100'; next.tail = 0; }
+      sc.endCondition = next;
+      this._refreshSystemRulesAfterEdit();
+    }));
+    card.appendChild(whenRow);
+
+    if (endCondition.type === 'fixed') {
+      const row = document.createElement('div');
+      row.className = 'event-row';
+      row.appendChild(this._tinyLabel('Seconds'));
+      row.appendChild(this._makeSystemTextInput(endCondition.seconds != null ? endCondition.seconds : (sc.duration || 20), (value) => {
+        const v = Math.max(0.1, parseFloat(value) || 0);
+        sc.endCondition.seconds = v;
+        this._refreshSystemRulesAfterEdit();
+      }, { type: 'number', step: 0.1, min: 0.1, max: 300 }));
+      card.appendChild(row);
+    } else if (endCondition.type === 'firstEscapeTail' || endCondition.type === 'allBallsGone') {
+      const row = document.createElement('div');
+      row.className = 'event-row';
+      row.appendChild(this._tinyLabel('Tail'));
+      row.appendChild(this._makeSystemTextInput(endCondition.tail != null ? endCondition.tail : 1.0, (value) => {
+        const v = Math.max(0, parseFloat(value) || 0);
+        sc.endCondition.tail = v;
+        this._refreshSystemRulesAfterEdit();
+      }, { type: 'number', step: 0.1, min: 0, max: 120 }));
+      card.appendChild(row);
+    } else if (endCondition.type === 'ballCountTail') {
+      const countRow = document.createElement('div');
+      countRow.className = 'event-row';
+      countRow.appendChild(this._tinyLabel('Count'));
+      countRow.appendChild(this._makeSystemTextInput(endCondition.count != null ? endCondition.count : 1, (value) => {
+        sc.endCondition.count = Math.max(0, parseInt(value, 10) || 0);
+        this._refreshSystemRulesAfterEdit();
+      }, { type: 'number', step: 1, min: 0, max: 999 }));
+      card.appendChild(countRow);
+
+      const tailRow = document.createElement('div');
+      tailRow.className = 'event-row';
+      tailRow.appendChild(this._tinyLabel('Tail'));
+      tailRow.appendChild(this._makeSystemTextInput(endCondition.tail != null ? endCondition.tail : 1.0, (value) => {
+        sc.endCondition.tail = Math.max(0, parseFloat(value) || 0);
+        this._refreshSystemRulesAfterEdit();
+      }, { type: 'number', step: 0.1, min: 0, max: 120 }));
+      card.appendChild(tailRow);
+    } else if (endCondition.type === 'bucketHitTail') {
+      const bucketRow = document.createElement('div');
+      bucketRow.className = 'event-row';
+      bucketRow.appendChild(this._tinyLabel('Bucket'));
+      bucketRow.appendChild(this._makeSystemTextInput(endCondition.bucketId || '', (value) => {
+        sc.endCondition.bucketId = value.trim();
+        this._refreshSystemRulesAfterEdit();
+      }, { placeholder: 'bin_100' }));
+      card.appendChild(bucketRow);
+
+      const tailRow = document.createElement('div');
+      tailRow.className = 'event-row';
+      tailRow.appendChild(this._tinyLabel('Tail'));
+      tailRow.appendChild(this._makeSystemTextInput(endCondition.tail != null ? endCondition.tail : 0, (value) => {
+        sc.endCondition.tail = Math.max(0, parseFloat(value) || 0);
+        this._refreshSystemRulesAfterEdit();
+      }, { type: 'number', step: 0.1, min: 0, max: 120 }));
+      card.appendChild(tailRow);
+    }
+
+    card.appendChild(this._makeSystemStaticRow('Do', 'Stop export'));
+    card.appendChild(this._makeSystemStaticRow('Info', 'Preset end condition'));
+  }
+
+  _fillSystemHardCapCard(card, seconds) {
+    const sc = this.app.simulator.scenario;
+    const whenRow = document.createElement('div');
+    whenRow.className = 'event-row';
+    whenRow.appendChild(this._tinyLabel('When'));
+    whenRow.appendChild(this._makeSystemTextInput(seconds, (value) => {
+      const v = Math.max(0.5, parseFloat(value) || 0.5);
+      sc.disableExportHardCap = false;
+      sc.maxExportSeconds = v;
+      sc.duration = v;
+      this._refreshSystemRulesAfterEdit();
+    }, { type: 'number', step: 0.5, min: 0.5, max: 300 }));
+    card.appendChild(whenRow);
+    card.appendChild(this._makeSystemStaticRow('Do', 'Hard stop export'));
+    card.appendChild(this._makeSystemStaticRow('Info', 'Safety cap'));
+  }
+
+  _fillSystemLiveStopCard(card, enabled) {
+    const sc = this.app.simulator.scenario;
+    const whenRow = document.createElement('div');
+    whenRow.className = 'event-row';
+    whenRow.appendChild(this._tinyLabel('When'));
+    whenRow.appendChild(this._makeSystemToggle('First ball escapes', enabled, (checked) => {
+      sc.stopOnFirstEscape = checked;
+      this._refreshSystemRulesAfterEdit();
+    }));
+    card.appendChild(whenRow);
+    card.appendChild(this._makeSystemStaticRow('Do', 'Pause live preview'));
+    card.appendChild(this._makeSystemStaticRow('Info', 'Live runtime rule'));
   }
 
   _makeEventRuleCard(rule) {
@@ -1798,7 +2081,9 @@ class UI {
     // Prefer the preset's maxExportSeconds (safety cap) so the field
     // reflects the cap after switching presets. Falls back to `duration`
     // for legacy scenarios that don't define a cap.
-    document.getElementById('export-duration').value = sc.maxExportSeconds || sc.duration;
+    document.getElementById('export-duration').value = sc.disableExportHardCap
+      ? ''
+      : (sc.maxExportSeconds || sc.duration);
     document.getElementById('vs-glow').value = sc.visuals.glow;
     document.getElementById('vs-pulse').checked = !!sc.visuals.pulse;
   }
@@ -2420,8 +2705,11 @@ class UI {
     // denominator even for event-driven end conditions. We use the
     // hard-cap seconds as the ceiling; the actual render usually finishes
     // well before this and the bar jumps to 100% when it does.
-    const hardCapSeconds = Math.min(120, Math.max(2,
-      Number(sc.maxExportSeconds) || (sc.satisfying ? sc.loopDuration : (sc.duration || 30))));
+    const hardCapSeconds = sc.disableExportHardCap
+      ? 120
+      : Math.min(120, Math.max(2,
+          Number(sc.maxExportSeconds) || (sc.satisfying ? sc.loopDuration : (sc.duration || 30))
+        ));
     const hintFrames = Math.ceil(hardCapSeconds * fps);
     const ecType = sc.endCondition && sc.endCondition.type;
     const hasExactFrameTarget = !ecType || ecType === 'loopDuration' || ecType === 'fixed';

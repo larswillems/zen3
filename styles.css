@@ -383,6 +383,74 @@ select {
   min-width: 0;
   overflow: hidden;
 }
+.system-event-card {
+  border-color: #334155;
+  background: linear-gradient(180deg, #07101c, #02040a);
+}
+.event-system-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.event-system-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid #0ea5e9;
+  color: #7dd3fc;
+  background: rgba(14, 165, 233, 0.12);
+  font-size: 10px;
+  letter-spacing: 1px;
+  font-weight: 700;
+}
+.event-static {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.65);
+  color: var(--text);
+  font-size: 12px;
+}
+.event-static.muted {
+  color: var(--muted);
+}
+.event-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.65);
+  color: var(--text);
+  font-size: 12px;
+}
+.event-toggle input[type=checkbox] {
+  margin: 0;
+}
+.system-rule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.system-rule-actions button.mini {
+  padding: 4px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  color: var(--accent);
+  background: rgba(14, 165, 233, 0.06);
+}
+.system-rule-actions button.mini:hover {
+  border-color: var(--accent);
+  background: rgba(14, 165, 233, 0.12);
+}
 .event-row {
   display: grid;
   grid-template-columns: 60px 1fr;

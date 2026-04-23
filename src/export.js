@@ -76,7 +76,9 @@ class ExportManager {
   _makeStopper(fps) {
     const sc = this.simulator.scenario;
     const ec = sc.endCondition || null;
-    const hardCapSeconds = Math.min(120, Math.max(2, Number(sc.maxExportSeconds) || 30));
+    const hardCapSeconds = sc.disableExportHardCap
+      ? 120
+      : Math.min(120, Math.max(2, Number(sc.maxExportSeconds) || 30));
     const hardCap = Math.ceil(hardCapSeconds * fps);
 
     // Fallback seconds if we've no structured endCondition.
