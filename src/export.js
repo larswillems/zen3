@@ -25,13 +25,34 @@
 //                                      stop `tail` s after alive balls drop to
 //                                      `count` or lower
 //
-// There's always a hard safety cap (30 s by default) so a broken rule can
-// never produce an infinite render.
+// Export runs until the scenario's end condition is met, or until the user
+// explicitly stops the render from the UI.
+
+function makeExportCancelledError() {
+  const err = new Error('Render stopped');
+  err.name = 'ExportCancelledError';
+  return err;
+}
+
+function throwIfExportCancelled(shouldCancel) {
+  if (shouldCancel && shouldCancel()) throw makeExportCancelledError();
+}
 
 class ExportManager {
-  constructor(simulator, audioEngine = null) {
-    this.simulator = simulator;
-    this.audioEngine = audioEngine;
+  constructor(simulator, audioEngine = null, options = {}) {
+    const simSnapshot = simulator && typeof simulator.createSnapshot === 'function'
+      ? simulator.createSnapshot()
+      : null;
+    this.simulator = simSnapshot ? Simulator.fromSnapshot(simSnapshot) : simulator;
+    this.audioEngine = audioEngine && typeof audioEngine.createExportClone === 'function'
+      ? audioEngine.createExportClone()
+      : audioEngine;
+    this._eventsSnapshot = options.eventsSnapshot
+      ? JSON.parse(JSON.stringify(options.eventsSnapshot))
+      : null;
+    this._rendererSnapshot = options.rendererSnapshot
+      ? JSON.parse(JSON.stringify(options.rendererSnapshot))
+      : null;
   }
 
   // ---------------------------------------------------------------
@@ -47,11 +68,13 @@ class ExportManager {
     canvas.height = 1920;
     const renderer = new Renderer(canvas);
 
-    const speedState = { override: null };
+    const speedState = { override: null, paused: false };
     const fakeApp = {
       renderer,
       simulator: this.simulator,
-      pause: () => { /* noop during export */ },
+      // Match live behavior: freeze simulation immediately, but keep rendering
+      // subsequent frames so finish particles / popup / flash can play out.
+      pause: () => { speedState.paused = true; },
       triggerSlowmo: (factor, seconds) => {
         speedState.override = { factor, life: seconds };
       },
@@ -67,88 +90,113 @@ class ExportManager {
     };
     const events = new EventEngine(fakeApp);
     events.setRules(this.simulator.scenario.events || []);
+    if (this._eventsSnapshot && typeof events.applySnapshot === 'function') {
+      events.applySnapshot(this._eventsSnapshot);
+    }
+    if (this._rendererSnapshot && typeof renderer.applySnapshot === 'function') {
+      renderer.applySnapshot(this._rendererSnapshot);
+    }
     return { canvas, renderer, events, speedState };
   }
 
   // Builds a predicate that, given (frameIndex, events, aliveCount), returns
-  // 'stop' when we should stop encoding. Bounded by a hard cap so nothing
-  // can ever run forever.
+  // 'stop' when we should stop encoding.
   _makeStopper(fps) {
     const sc = this.simulator.scenario;
     const ec = sc.endCondition || null;
-    const hardCapSeconds = sc.disableExportHardCap
-      ? 120
-      : Math.min(120, Math.max(2, Number(sc.maxExportSeconds) || 30));
-    const hardCap = Math.ceil(hardCapSeconds * fps);
 
     // Fallback seconds if we've no structured endCondition.
     const fallback = sc.satisfying ? (sc.loopDuration || 10) : (sc.duration || 12);
+    const withFinishStop = (base) => {
+      let finishAt = -1;
+      let finishTailFrames = 0;
+      return {
+        describe: base.describe,
+        fn: (i, events, alive) => {
+          if (finishAt < 0) {
+            const finishEvent = Array.isArray(events) ? events.find((e) => e && e.type === 'finish') : null;
+            if (finishEvent) {
+              finishAt = i;
+              finishTailFrames = Math.max(0, Math.ceil(Math.max(0, Number(finishEvent.tail) || 0) * fps));
+            }
+          }
+          if (finishAt >= 0 && (i - finishAt) >= finishTailFrames) return 'stop';
+          return base.fn(i, events, alive);
+        },
+      };
+    };
 
     if (!ec || ec.type === 'loopDuration') {
       const frames = Math.ceil((sc.loopDuration || fallback) * fps);
-      return { describe: `loop (${(sc.loopDuration || fallback).toFixed(1)}s)`,
-               fn: (i) => i + 1 >= frames ? 'stop' : null };
+      return withFinishStop({ describe: `loop (${(sc.loopDuration || fallback).toFixed(1)}s)`,
+               fn: (i) => i + 1 >= frames ? 'stop' : null });
     }
     if (ec.type === 'fixed') {
-      const seconds = Math.min(hardCapSeconds, Math.max(0.5, ec.seconds || fallback));
+      const seconds = Math.max(0.5, ec.seconds || fallback);
       const frames = Math.ceil(seconds * fps);
-      return { describe: `fixed (${seconds.toFixed(1)}s)`,
-               fn: (i) => i + 1 >= frames ? 'stop' : null };
+      return withFinishStop({ describe: `fixed (${seconds.toFixed(1)}s)`,
+               fn: (i) => i + 1 >= frames ? 'stop' : null });
+    }
+    if (ec.type === 'finish') {
+      return withFinishStop({
+        describe: 'after-finish (wait until finish or stop manually)',
+        // For explicit finish-driven presets, never hard-stop on duration/export
+        // caps. The user asked for render control without hard caps; the Stop
+        // Render button is the safety valve if a broken scenario never reaches
+        // its finish trigger.
+        fn: () => null,
+      });
     }
     if (ec.type === 'firstEscapeTail') {
       const tailFrames = Math.ceil((ec.tail != null ? ec.tail : 2.5) * fps);
       let firstAt = -1;
-      return { describe: `after-first-escape (+${(tailFrames / fps).toFixed(1)}s)`,
+      return withFinishStop({ describe: `after-first-escape (+${(tailFrames / fps).toFixed(1)}s)`,
                fn: (i, events) => {
                  if (firstAt < 0 && events.some((e) => e.type === 'escape')) firstAt = i;
                  if (firstAt >= 0 && (i - firstAt) >= tailFrames) return 'stop';
-                 if (i + 1 >= hardCap) return 'stop';
                  return null;
-               } };
+               } });
     }
     if (ec.type === 'allBallsGone') {
       const tailFrames = Math.ceil((ec.tail != null ? ec.tail : 1.0) * fps);
       let goneAt = -1;
       let seenAlive = false;
-      return { describe: `after-all-gone (+${(tailFrames / fps).toFixed(1)}s)`,
+      return withFinishStop({ describe: `after-all-gone (+${(tailFrames / fps).toFixed(1)}s)`,
                fn: (i, events, alive) => {
                  if (alive > 0) seenAlive = true;
                  if (seenAlive && alive === 0 && goneAt < 0) goneAt = i;
                  if (goneAt >= 0 && (i - goneAt) >= tailFrames) return 'stop';
-                 if (i + 1 >= hardCap) return 'stop';
                  return null;
-               } };
+               } });
     }
     if (ec.type === 'ballCountTail') {
       const tailFrames = Math.ceil((ec.tail != null ? ec.tail : 1.0) * fps);
       const targetCount = Math.max(0, ec.count | 0);
       let hitAt = -1;
-      return { describe: `after-ball-count<=${targetCount} (+${(tailFrames / fps).toFixed(1)}s)`,
+      return withFinishStop({ describe: `after-ball-count<=${targetCount} (+${(tailFrames / fps).toFixed(1)}s)`,
                fn: (i, _events, alive) => {
                  if (alive <= targetCount && hitAt < 0) hitAt = i;
                  if (hitAt >= 0 && (i - hitAt) >= tailFrames) return 'stop';
-                 if (i + 1 >= hardCap) return 'stop';
                  return null;
-               } };
+               } });
     }
     if (ec.type === 'bucketHitTail') {
       const tailFrames = Math.ceil((ec.tail != null ? ec.tail : 0) * fps);
       const bucketId = String(ec.bucketId || '');
       let hitAt = -1;
-      return { describe: `after-bucket-hit:${bucketId} (+${(tailFrames / fps).toFixed(1)}s)`,
+      return withFinishStop({ describe: `after-bucket-hit:${bucketId} (+${(tailFrames / fps).toFixed(1)}s)`,
                fn: (i, events) => {
                  if (hitAt < 0 && events.some((e) => e.type === 'score' && String(e.bucketId || '') === bucketId)) {
                    hitAt = i;
                  }
                  if (hitAt >= 0 && (i - hitAt) >= tailFrames) return 'stop';
-                 if (i + 1 >= hardCap) return 'stop';
                  return null;
-               } };
+               } });
     }
     // Unknown condition: fall back to fixed.
     const frames = Math.ceil(fallback * fps);
-    return { describe: `fallback (${fallback.toFixed(1)}s)`,
-             fn: (i) => i + 1 >= frames ? 'stop' : null };
+    return withFinishStop({ describe: `fallback (${fallback.toFixed(1)}s)`,
+             fn: (i) => i + 1 >= frames ? 'stop' : null });
   }
 
   // Shared per-frame stepping logic used by every output format.
@@ -160,47 +208,53 @@ class ExportManager {
   // the EventEngine triggers (shatter -> fanfare, etc.) gets the right
   // timestamp when it calls into `fakeApp.audio`.
   _stepOneFrame(
-    renderer, events, stopper, speedState,
+    renderer, events, stopper, speedState, stopState,
     frameIdx, fps, dt, stepsPerFrame, accRef, audioSink = null,
   ) {
     const sim = this.simulator;
     const frameStartVideoTime = frameIdx / fps;
     if (audioSink) audioSink.currentTime = frameStartVideoTime;
 
-    let frameSpeed = 1.0;
-    if (speedState.override) {
-      frameSpeed = speedState.override.factor;
-      speedState.override.life -= 1 / fps;
-      if (speedState.override.life <= 0) speedState.override = null;
-    }
-    accRef.value += frameSpeed * stepsPerFrame;
     let lastEvents = [];
-    let subStep = 0;
-    while (accRef.value >= 1) {
-      sim.step(dt);
-      const evs = sim.lastEvents();
-      renderer.handleEvents(evs);
-      // Each sim tick within this frame gets a tiny sub-frame time offset so
-      // rapid bursts (e.g. multiple spike touches in one frame) don't all
-      // collapse onto the same millisecond - this keeps the offline audio
-      // throttle behaving the same as it would live.
-      const subTime = frameStartVideoTime + subStep * (frameSpeed / fps);
-      if (audioSink) {
-        audioSink.currentTime = subTime;
-        if (evs.length > 0) {
-          // Physics reuses a single mutable `events` array and clears it at the
-          // start of every tick. Snapshot the event payload NOW, otherwise the
-          // offline audio pass later sees a bunch of empty batches.
-          audioSink.timedEvents.push({
-            time: subTime,
-            events: evs.map((ev) => ({ ...ev })),
-          });
-        }
+    if (!stopState.reached && !speedState.paused) {
+      let frameSpeed = 1.0;
+      if (speedState.override) {
+        frameSpeed = speedState.override.factor;
+        speedState.override.life -= 1 / fps;
+        if (speedState.override.life <= 0) speedState.override = null;
       }
-      events.update(sim.state, evs);
-      lastEvents = lastEvents.concat(evs);
-      accRef.value -= 1;
-      subStep++;
+      accRef.value += frameSpeed * stepsPerFrame;
+      let subStep = 0;
+      while (accRef.value >= 1) {
+        sim.step(dt);
+        const evs = sim.lastEvents();
+        renderer.handleEvents(evs);
+        // Each sim tick within this frame gets a tiny sub-frame time offset so
+        // rapid bursts (e.g. multiple spike touches in one frame) don't all
+        // collapse onto the same millisecond - this keeps the offline audio
+        // throttle behaving the same as it would live.
+        const subTime = frameStartVideoTime + subStep * (frameSpeed / fps);
+        if (audioSink) {
+          audioSink.currentTime = subTime;
+          if (evs.length > 0) {
+            // Physics reuses a single mutable `events` array and clears it at the
+            // start of every tick. Snapshot the event payload NOW, otherwise the
+            // offline audio pass later sees a bunch of empty batches.
+            audioSink.timedEvents.push({
+              time: subTime,
+              events: evs.map((ev) => ({ ...ev })),
+            });
+          }
+        }
+        events.update(sim.state, evs);
+        lastEvents = lastEvents.concat(evs);
+        if (speedState.paused) {
+          accRef.value = 0;
+          break;
+        }
+        accRef.value -= 1;
+        subStep++;
+      }
     }
 
     // Particles and flash/popup animate in video-time.
@@ -210,14 +264,20 @@ class ExportManager {
       visuals: sim.scenario.visuals,
       softMode: !!sim.scenario.satisfying,
     });
-    const alive = sim.state.objects.filter((o) => o.type === 'ball' && o.alive && !o._escaped).length;
-    return stopper.fn(frameIdx, lastEvents, alive) === 'stop';
+    const alive = sim.state.objects.filter((o) =>
+      o.type === 'ball' && o.alive && !o._escaped && !o._frozen && !o.fixed
+    ).length;
+    if (!stopState.reached && stopper.fn(frameIdx, lastEvents, alive) === 'stop') {
+      stopState.reached = true;
+    }
+    if (!stopState.reached) return false;
+    return !renderer.hasActiveTransientFx();
   }
 
   // -------------------------
   // MP4 via WebCodecs + mp4-muxer
   // -------------------------
-  async exportMP4({ fps = 60, onProgress, onStatus } = {}) {
+  async exportMP4({ fps = 60, onProgress, onStatus, shouldCancel } = {}) {
     if (typeof window.VideoEncoder === 'undefined') {
       throw new Error('This browser lacks WebCodecs (VideoEncoder). Try Chrome/Edge or PNG frames.');
     }
@@ -313,6 +373,12 @@ class ExportManager {
       output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
       error: (e) => { encoderError = e; console.error('VideoEncoder error:', e); },
     });
+    let encoderClosed = false;
+    const closeEncoder = () => {
+      if (encoderClosed) return;
+      try { encoder.close(); } catch (_) { /* already closed */ }
+      encoderClosed = true;
+    };
     encoder.configure({
       codec, width: 1080, height: 1920, bitrate: 12_000_000, framerate: fps,
       avc: { format: 'avc' },
@@ -325,149 +391,147 @@ class ExportManager {
 
     const { canvas, renderer, events, speedState } = this._makePipeline({ audioSink });
 
-    sim.rebuild();
     const stopper = this._makeStopper(fps);
     if (onStatus) onStatus('Rendering frames · ' + stopper.describe);
-
-    const acc = { value: 0 };
-    let frameIdx = 0;
-    const keyEvery = fps * 2;
-    while (true) {
-      if (encoderError) throw encoderError;
-      const shouldStop = this._stepOneFrame(
-        renderer, events, stopper, speedState,
-        frameIdx, fps, dt, stepsPerFrame, acc, audioSink,
-      );
-      const frameTs = Math.round(frameIdx * 1_000_000 / fps);
-      const nextFrameTs = Math.round((frameIdx + 1) * 1_000_000 / fps);
-      const frame = new window.VideoFrame(canvas, {
-        // Use adjacent rounded timestamps so the encoded frame durations sum
-        // exactly to the target timeline. A fixed rounded `duration` can make
-        // some players interpret 60fps as tiny variable pacing.
-        timestamp: frameTs,
-        duration: nextFrameTs - frameTs,
-      });
-      try {
-        encoder.encode(frame, { keyFrame: frameIdx % keyEvery === 0 });
-      } finally {
-        frame.close();
-      }
-      frameIdx++;
-
-      if (onProgress) onProgress(frameIdx);
-      if (frameIdx % 8 === 0) await new Promise((r) => setTimeout(r, 0));
-
-      if (shouldStop) break;
-    }
-
-    await encoder.flush();
-    encoder.close();
-
-    // --- Render and encode the audio track --------------------------------
-    let audioCodecUsed = null;
-    let audioChunkCount = 0;
-    let audioFailReason = canDoAudio ? null : audioReason.join(', ');
-    let audioWavBlob = null;
-    let audioPeak = 0;
-    if (audioSink) {
-      try {
-        if (onStatus) onStatus('Rendering audio…');
-        const durationSec = frameIdx / fps;
-        console.info('[export] collected audio events:',
-          audioSink.timedEvents.length, 'batches,',
-          audioSink.fanfareCalls.length, 'fanfare call(s)');
-        // Count individual events by type so we know bounces/escapes landed.
-        const typeCounts = {};
-        for (const b of audioSink.timedEvents) {
-          for (const ev of (b.events || [])) {
-            typeCounts[ev.type] = (typeCounts[ev.type] || 0) + 1;
-          }
-        }
-        console.info('[export] event type counts:', typeCounts);
-
-        const audioBuffer = await this.audioEngine.renderOffline({
-          timedEvents:  audioSink.timedEvents,
-          fanfareCalls: audioSink.fanfareCalls,
-          durationSec,
-          sampleRate:   AUDIO_SR,
-          W: 1080, H: 1920,
-        });
-        if (!audioBuffer) {
-          throw new Error('OfflineAudioContext render returned null');
-        }
-
-        // Compute peak amplitude across all channels. If this is ~0 the
-        // OfflineAudioContext produced silence (audio engine bug) and the
-        // MP4 was always going to be silent even if muxing worked.
-        for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
-          const d = audioBuffer.getChannelData(c);
-          for (let i = 0; i < d.length; i += 256) {
-            const a = Math.abs(d[i]);
-            if (a > audioPeak) audioPeak = a;
-          }
-        }
-        console.info('[export] audio rendered:',
-          audioBuffer.length, 'samples @',
-          audioBuffer.sampleRate, 'Hz,',
-          audioBuffer.numberOfChannels, 'ch  · peak=',
-          audioPeak.toFixed(4));
-
-        // Always produce a WAV sidecar so the user can verify the rendered
-        // audio INDEPENDENTLY of mp4-muxer. If the sidecar plays fine but
-        // the MP4 is silent, the bug is in mux/player. If the sidecar is
-        // silent, the bug is in the audio engine/events.
-        try {
-          audioWavBlob = this._audioBufferToWavBlob(audioBuffer, durationSec);
-          console.info('[export] wav sidecar bytes:', audioWavBlob.size);
-        } catch (e) {
-          console.warn('[export] wav sidecar failed:', e);
-        }
-
-        if (audioPeak < 1e-4) {
-          // Skip muxing a silent track — it would only confuse players.
-          throw new Error(
-            `offline render was silent (peak=${audioPeak.toFixed(6)}), `
-            + `events=${audioSink.timedEvents.length}, `
-            + `fanfare=${audioSink.fanfareCalls.length}`,
-          );
-        }
-
-        if (onStatus) onStatus('Encoding audio (' + audioEncCodec + ')…');
-        audioChunkCount = await this._encodeAudioBufferToMuxer(
-          audioBuffer, muxer,
-          audioEncCodec, AUDIO_CHANNELS, AUDIO_SR, AUDIO_BITRATE,
-          durationSec,
+    let result = null;
+    try {
+      const acc = { value: 0 };
+      const stopState = { reached: false };
+      let frameIdx = 0;
+      const keyEvery = fps * 2;
+      while (true) {
+        throwIfExportCancelled(shouldCancel);
+        if (encoderError) throw encoderError;
+        const shouldStop = this._stepOneFrame(
+          renderer, events, stopper, speedState, stopState,
+          frameIdx, fps, dt, stepsPerFrame, acc, audioSink,
         );
-        audioCodecUsed = audioEncCodec;
-        console.info('[export] audio muxed:', audioChunkCount, 'AAC/Opus chunks');
-        if (audioChunkCount === 0) {
-          throw new Error('AudioEncoder produced 0 chunks');
+        const frameTs = Math.round(frameIdx * 1_000_000 / fps);
+        const nextFrameTs = Math.round((frameIdx + 1) * 1_000_000 / fps);
+        const frame = new window.VideoFrame(canvas, {
+          // Use adjacent rounded timestamps so the encoded frame durations sum
+          // exactly to the target timeline. A fixed rounded `duration` can make
+          // some players interpret 60fps as tiny variable pacing.
+          timestamp: frameTs,
+          duration: nextFrameTs - frameTs,
+        });
+        try {
+          encoder.encode(frame, { keyFrame: frameIdx % keyEvery === 0 });
+        } finally {
+          frame.close();
         }
-      } catch (e) {
-        // Loud failure: surface to the UI + console so the user can see WHY
-        // the MP4 is silent and report back if needed.
-        audioCodecUsed = null;
-        audioFailReason = e && e.message ? e.message : String(e);
-        console.error('[export] Audio export failed:', e);
-        if (onStatus) onStatus('⚠ audio skipped: ' + audioFailReason);
+        frameIdx++;
+
+        if (onProgress) onProgress(frameIdx);
+        if (frameIdx % 8 === 0) await new Promise((r) => setTimeout(r, 0));
+        throwIfExportCancelled(shouldCancel);
+
+        if (shouldStop) break;
       }
+
+      throwIfExportCancelled(shouldCancel);
+      await encoder.flush();
+      closeEncoder();
+
+      // --- Render and encode the audio track --------------------------------
+      let audioCodecUsed = null;
+      let audioChunkCount = 0;
+      let audioFailReason = canDoAudio ? null : audioReason.join(', ');
+      let audioPeak = 0;
+      if (audioSink) {
+        try {
+          throwIfExportCancelled(shouldCancel);
+          if (onStatus) onStatus('Rendering audio…');
+          const durationSec = frameIdx / fps;
+          console.info('[export] collected audio events:',
+            audioSink.timedEvents.length, 'batches,',
+            audioSink.fanfareCalls.length, 'fanfare call(s)');
+          // Count individual events by type so we know bounces/escapes landed.
+          const typeCounts = {};
+          for (const b of audioSink.timedEvents) {
+            for (const ev of (b.events || [])) {
+              typeCounts[ev.type] = (typeCounts[ev.type] || 0) + 1;
+            }
+          }
+          console.info('[export] event type counts:', typeCounts);
+
+          const audioBuffer = await this.audioEngine.renderOffline({
+            timedEvents:  audioSink.timedEvents,
+            fanfareCalls: audioSink.fanfareCalls,
+            durationSec,
+            sampleRate:   AUDIO_SR,
+            W: 1080, H: 1920,
+          });
+          if (!audioBuffer) {
+            throw new Error('OfflineAudioContext render returned null');
+          }
+
+          // Compute peak amplitude across all channels. If this is ~0 the
+          // OfflineAudioContext produced silence (audio engine bug) and the
+          // MP4 was always going to be silent even if muxing worked.
+          for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
+            const d = audioBuffer.getChannelData(c);
+            for (let i = 0; i < d.length; i += 256) {
+              const a = Math.abs(d[i]);
+              if (a > audioPeak) audioPeak = a;
+            }
+          }
+          console.info('[export] audio rendered:',
+            audioBuffer.length, 'samples @',
+            audioBuffer.sampleRate, 'Hz,',
+            audioBuffer.numberOfChannels, 'ch  · peak=',
+            audioPeak.toFixed(4));
+
+          if (audioPeak < 1e-4) {
+            // Skip muxing a silent track — it would only confuse players.
+            throw new Error(
+              `offline render was silent (peak=${audioPeak.toFixed(6)}), `
+              + `events=${audioSink.timedEvents.length}, `
+              + `fanfare=${audioSink.fanfareCalls.length}`,
+            );
+          }
+
+          throwIfExportCancelled(shouldCancel);
+          if (onStatus) onStatus('Encoding audio (' + audioEncCodec + ')…');
+          audioChunkCount = await this._encodeAudioBufferToMuxer(
+            audioBuffer, muxer,
+            audioEncCodec, AUDIO_CHANNELS, AUDIO_SR, AUDIO_BITRATE,
+            durationSec,
+            shouldCancel,
+          );
+          audioCodecUsed = audioEncCodec;
+          console.info('[export] audio muxed:', audioChunkCount, 'AAC/Opus chunks');
+          if (audioChunkCount === 0) {
+            throw new Error('AudioEncoder produced 0 chunks');
+          }
+        } catch (e) {
+          if (e && e.name === 'ExportCancelledError') throw e;
+          // Loud failure: surface to the UI + console so the user can see WHY
+          // the MP4 is silent and report back if needed.
+          audioCodecUsed = null;
+          audioFailReason = e && e.message ? e.message : String(e);
+          console.error('[export] Audio export failed:', e);
+          if (onStatus) onStatus('⚠ audio skipped: ' + audioFailReason);
+        }
+      }
+
+      muxer.finalize();
+      result = {
+        blob: new Blob([muxer.target.buffer], { type: 'video/mp4' }),
+        frames: frameIdx,
+        seconds: frameIdx / fps,
+        mimeType: 'video/mp4',
+        extension: 'mp4',
+        codec,
+        audioCodec: audioCodecUsed,
+        audioFailReason,
+        audioPeak,
+      };
+    } finally {
+      closeEncoder();
     }
 
-    muxer.finalize();
-    sim.rebuild();
-
-    return {
-      blob: new Blob([muxer.target.buffer], { type: 'video/mp4' }),
-      frames: frameIdx,
-      seconds: frameIdx / fps,
-      mimeType: 'video/mp4',
-      extension: 'mp4',
-      codec,
-      audioCodec: audioCodecUsed,
-      audioFailReason,
-      audioWav: audioWavBlob,
-      audioPeak,
-    };
+    return result;
   }
 
   // Encode a Web Audio AudioBuffer (interleaved, 2ch) into a standard 16-bit
@@ -523,7 +587,7 @@ class ExportManager {
   // has a small tail so the final fanfare can decay naturally, but we don't
   // want that tail in the final MP4).
   async _encodeAudioBufferToMuxer(
-    audioBuffer, muxer, codec, numCh, sampleRate, bitrate, durationSec,
+    audioBuffer, muxer, codec, numCh, sampleRate, bitrate, durationSec, shouldCancel = null,
   ) {
     let err = null;
     let chunkCount = 0;
@@ -571,6 +635,7 @@ class ExportManager {
 
     const chunkFrames = 1024; // AAC works with 1024-sample frames
     for (let start = 0; start < totalFrames; start += chunkFrames) {
+      throwIfExportCancelled(shouldCancel);
       if (err) throw err;
       const frames = Math.min(chunkFrames, totalFrames - start);
       // f32-planar layout: [L0..L(frames-1), R0..R(frames-1)]
@@ -593,9 +658,11 @@ class ExportManager {
       }
       if ((start / chunkFrames) % 32 === 0) {
         await new Promise((r) => setTimeout(r, 0));
+        throwIfExportCancelled(shouldCancel);
       }
     }
 
+    throwIfExportCancelled(shouldCancel);
     await enc.flush();
     enc.close();
     if (err) throw err;
@@ -605,7 +672,7 @@ class ExportManager {
   // -------------------------
   // PNG frame sequence (ZIP)
   // -------------------------
-  async exportFrames({ fps = 60, onProgress, onStatus } = {}) {
+  async exportFrames({ fps = 60, onProgress, onStatus, shouldCancel } = {}) {
     if (typeof JSZip === 'undefined') throw new Error('JSZip not loaded; PNG export unavailable.');
     const { canvas, renderer, events, speedState } = this._makePipeline();
     const sim = this.simulator;
@@ -613,21 +680,24 @@ class ExportManager {
     const stepsPerFrame = (1 / dt) / fps;
 
     const zip = new JSZip();
-    sim.rebuild();
     const stopper = this._makeStopper(fps);
     if (onStatus) onStatus('Rendering PNG frames · ' + stopper.describe);
-
+    let result = null;
     const acc = { value: 0 };
+    const stopState = { reached: false };
     let frameIdx = 0;
     while (true) {
+      throwIfExportCancelled(shouldCancel);
       const shouldStop = this._stepOneFrame(
-        renderer, events, stopper, speedState, frameIdx, fps, dt, stepsPerFrame, acc,
+        renderer, events, stopper, speedState, stopState, frameIdx, fps, dt, stepsPerFrame, acc,
       );
       const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+      throwIfExportCancelled(shouldCancel);
       zip.file(`frame_${String(frameIdx).padStart(6, '0')}.png`, await blob.arrayBuffer());
       frameIdx++;
       if (onProgress) onProgress(frameIdx);
       if (frameIdx % 4 === 0) await new Promise((r) => setTimeout(r, 0));
+      throwIfExportCancelled(shouldCancel);
       if (shouldStop) break;
     }
     zip.file('scenario.json', JSON.stringify(sim.getScenario(), null, 2));
@@ -636,14 +706,14 @@ class ExportManager {
       stop: stopper.describe,
       ffmpeg_hint: `ffmpeg -framerate ${fps} -i frame_%06d.png -c:v libx264 -pix_fmt yuv420p -crf 18 output.mp4`,
     }, null, 2));
-    sim.rebuild();
-    return {
+    result = {
       blob: await zip.generateAsync({ type: 'blob' }),
       frames: frameIdx,
       seconds: frameIdx / fps,
       mimeType: 'application/zip',
       extension: 'zip',
     };
+    return result;
   }
 }
 

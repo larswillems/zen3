@@ -26,7 +26,10 @@ const SOUND_PRESETS = {
     { value: 'thud',     label: 'Thud (low)' },
     { value: 'chirp',    label: 'Chirp (up-sweep)' },
     { value: 'pop',      label: 'Pop (noise burst)' },
+    { value: 'piano',    label: 'Piano' },
+    { value: 'pianoRise', label: 'Piano rise' },
     { value: 'bell',     label: 'Bell' },
+    { value: 'legendChime', label: 'Legend chime' },
     { value: 'soft',     label: 'Soft sine' },
     { value: 'laser',    label: 'Laser (down-sweep)' },
     { value: 'silent',   label: 'Silent' },
@@ -58,6 +61,16 @@ const SOUND_PRESETS = {
     { value: 'freezer',  label: 'Freezer (low chirp)' },
     { value: 'silent',   label: 'Silent' },
   ],
+  gapPass: [
+    { value: '',         label: 'Auto by outcome' },
+    { value: 'glass',    label: 'Glass shatter' },
+    { value: 'burst',    label: 'Burst' },
+    { value: 'burn',     label: 'Burn' },
+    { value: 'whoosh',   label: 'Whoosh' },
+    { value: 'zap',      label: 'Zap' },
+    { value: 'explode',  label: 'Explode' },
+    { value: 'silent',   label: 'Silent' },
+  ],
 };
 window.SOUND_PRESETS = SOUND_PRESETS;
 
@@ -76,6 +89,15 @@ class AudioEngine {
     this._rootMidi = 60; // C4
     this._melody = null;
     this._melodyIndex = 0;
+    this._pianoRiseIndex = 0;
+    this._soundAssets = {};
+    this._assetBytes = new Map();
+    this._liveAssetBuffers = new Map();
+    this._assetDecodePromises = new Map();
+    this._pendingAssetPlaybacks = new Map();
+    this._assetMixes = new Map();
+    this._assetPlaybackWindows = new Map();
+    this._activeAssetBuffers = null;
     this._buildVoiceMap();
   }
 
@@ -93,6 +115,9 @@ class AudioEngine {
     const { master } = this._buildMasterChain(this.ctx, this.volume);
     this.master = master;
     this._ready = true;
+    for (const assetId of Object.keys(this._soundAssets || {})) {
+      this._ensureLiveAssetBuffer(assetId).catch(() => {});
+    }
     return true;
   }
 
@@ -106,6 +131,26 @@ class AudioEngine {
   }
 
   setScenario(scenario) {
+    this._soundAssets = (scenario && scenario.soundAssets && typeof scenario.soundAssets === 'object')
+      ? scenario.soundAssets
+      : {};
+    for (const key of Array.from(this._liveAssetBuffers.keys())) {
+      if (!this._soundAssets[key]) this._liveAssetBuffers.delete(key);
+    }
+    for (const key of Array.from(this._assetMixes.keys())) {
+      if (!this._soundAssets[key]) this._assetMixes.delete(key);
+    }
+    for (const key of Array.from(this._assetPlaybackWindows.keys())) {
+      if (!this._soundAssets[key]) this._assetPlaybackWindows.delete(key);
+    }
+    for (const key of Array.from(this._pendingAssetPlaybacks.keys())) {
+      if (!this._soundAssets[key]) this._pendingAssetPlaybacks.delete(key);
+    }
+    if (this.ctx) {
+      for (const assetId of Object.keys(this._soundAssets)) {
+        this._ensureLiveAssetBuffer(assetId).catch(() => {});
+      }
+    }
     const melody = scenario && scenario.melody;
     if (!melody || !melody.enabled || !Array.isArray(melody.notes) || melody.notes.length === 0) {
       this._melody = null;
@@ -134,6 +179,24 @@ class AudioEngine {
 
   resetTimelineState() {
     this._melodyIndex = 0;
+    this._pianoRiseIndex = 0;
+    this._assetPlaybackWindows.clear();
+  }
+
+  createExportClone() {
+    const clone = new AudioEngine();
+    clone.enabled = this.enabled;
+    clone.volume = this.volume;
+    clone._soundAssets = JSON.parse(JSON.stringify(this._soundAssets || {}));
+    clone._melody = this._melody ? {
+      ...this._melody,
+      triggerSources: Array.isArray(this._melody.triggerSources) ? this._melody.triggerSources.slice() : [],
+      notes: Array.isArray(this._melody.notes) ? this._melody.notes.slice() : [],
+    } : null;
+    clone._melodyIndex = this._melodyIndex;
+    clone._pianoRiseIndex = this._pianoRiseIndex;
+    clone._assetBytes = new Map(this._assetBytes);
+    return clone;
   }
 
   // --- Shared helpers ------------------------------------------------------
@@ -202,6 +265,26 @@ class AudioEngine {
     this._routeWithPan(ctx, dest, g, pan);
     osc.start(t0);
     osc.stop(t0 + attack + decay + 0.05);
+  }
+
+  _pianoTone(ctx, dest, t0, freq, {
+    pan = 0, gain = 0.28, decay = 0.42, detuneCents = 0,
+  } = {}) {
+    const partials = [
+      { mul: 1.00, gain: 1.00, wave: 'sine', decay: 1.00 },
+      { mul: 2.00, gain: 0.20, wave: 'sine', decay: 0.62 },
+      { mul: 4.00, gain: 0.055, wave: 'sine', decay: 0.32 },
+    ];
+    for (const p of partials) {
+      this._blip(ctx, dest, t0, freq * p.mul, {
+        pan,
+        gain: gain * p.gain,
+        attack: 0.004,
+        decay: decay * p.decay,
+        wave: p.wave,
+        detuneCents,
+      });
+    }
   }
 
   _sweep(ctx, dest, t0, {
@@ -307,6 +390,172 @@ class AudioEngine {
     return true;
   }
 
+  _assetEntry(assetId) {
+    if (!assetId) return null;
+    return this._soundAssets && this._soundAssets[assetId] ? this._soundAssets[assetId] : null;
+  }
+
+  async _assetBytesFor(assetId) {
+    if (!assetId) return null;
+    if (this._assetBytes.has(assetId)) return this._assetBytes.get(assetId);
+    const entry = this._assetEntry(assetId);
+    if (!entry) return null;
+    if (entry.url && typeof entry.url === 'string' && typeof fetch === 'function') {
+      try {
+        const response = await fetch(entry.url);
+        if (!response.ok) return null;
+        const buf = await response.arrayBuffer();
+        this._assetBytes.set(assetId, buf);
+        return buf;
+      } catch (_) {
+        return null;
+      }
+    }
+    if (!entry.dataUrl || typeof entry.dataUrl !== 'string') return null;
+    const comma = entry.dataUrl.indexOf(',');
+    if (comma < 0) return null;
+    try {
+      const raw = atob(entry.dataUrl.slice(comma + 1));
+      const out = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+      const buf = out.buffer;
+      this._assetBytes.set(assetId, buf);
+      return buf;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async _decodeAssetForContext(ctx, assetId) {
+    const bytes = await this._assetBytesFor(assetId);
+    if (!bytes || !ctx || typeof ctx.decodeAudioData !== 'function') return null;
+    try {
+      return await ctx.decodeAudioData(bytes.slice(0));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async _ensureLiveAssetBuffer(assetId) {
+    if (!assetId || !this.ctx) return null;
+    if (this._liveAssetBuffers.has(assetId)) return this._liveAssetBuffers.get(assetId);
+    if (this._assetDecodePromises.has(assetId)) return this._assetDecodePromises.get(assetId);
+    const pending = this._decodeAssetForContext(this.ctx, assetId).then((buffer) => {
+      this._assetDecodePromises.delete(assetId);
+      if (buffer) this._liveAssetBuffers.set(assetId, buffer);
+      return buffer;
+    });
+    this._assetDecodePromises.set(assetId, pending);
+    return pending;
+  }
+
+  _playSampleBuffer(ctx, dest, t0, buffer, pan = 0, volume = 1, onEnded = null) {
+    if (!buffer) return false;
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    if (typeof onEnded === 'function') src.onended = onEnded;
+    const g = ctx.createGain();
+    g.gain.value = Math.max(0, Math.min(2, volume != null ? volume : 1));
+    src.connect(g);
+    this._routeWithPan(ctx, dest, g, pan);
+    src.start(t0);
+    return true;
+  }
+
+  _assetMixFor(assetId) {
+    if (!assetId || !this.ctx || !this.master) return null;
+    const existing = this._assetMixes.get(assetId);
+    if (existing) return existing;
+    const gain = this.ctx.createGain();
+    gain.gain.value = 1;
+    gain.connect(this.master);
+    const mix = { gain, active: 0 };
+    this._assetMixes.set(assetId, mix);
+    return mix;
+  }
+
+  _setAssetMixGain(mix, ctx, t0) {
+    if (!mix || !ctx) return;
+    const gain = 1 / Math.max(1, mix.active || 0);
+    const at = Math.max(ctx.currentTime || 0, t0 || 0);
+    mix.gain.gain.cancelScheduledValues(at);
+    mix.gain.gain.setTargetAtTime(gain, at, 0.012);
+  }
+
+  _playUploadedAssetBuffer(ctx, dest, t0, assetId, buffer, pan = 0, volume = 1) {
+    if (!buffer) return false;
+    if (ctx === this.ctx && dest === this.master) {
+      const mix = this._assetMixFor(assetId);
+      if (mix) {
+        mix.active += 1;
+        this._setAssetMixGain(mix, ctx, t0);
+        return this._playSampleBuffer(ctx, mix.gain, t0, buffer, pan, volume, () => {
+          mix.active = Math.max(0, mix.active - 1);
+          this._setAssetMixGain(mix, ctx, ctx.currentTime);
+        });
+      }
+    }
+
+    const windows = this._assetPlaybackWindows.get(assetId) || [];
+    const now = Math.max(0, t0 || 0);
+    const active = windows.filter((end) => end > now);
+    active.push(now + (buffer.duration || 0));
+    this._assetPlaybackWindows.set(assetId, active);
+    return this._playSampleBuffer(ctx, dest, t0, buffer, pan, volume / active.length);
+  }
+
+  _playUploadedAsset(ctx, dest, t0, assetId, pan = 0, volume = 1) {
+    if (!assetId) return false;
+    if (this._activeAssetBuffers && this._activeAssetBuffers.has(assetId)) {
+      return this._playUploadedAssetBuffer(ctx, dest, t0, assetId, this._activeAssetBuffers.get(assetId), pan, volume);
+    }
+    if (ctx === this.ctx) {
+      const ready = this._liveAssetBuffers.get(assetId);
+      if (ready) return this._playUploadedAssetBuffer(ctx, dest, t0, assetId, ready, pan, volume);
+      const pendingCount = this._pendingAssetPlaybacks.get(assetId) || 0;
+      if (pendingCount < 12) {
+        this._pendingAssetPlaybacks.set(assetId, pendingCount + 1);
+        this._ensureLiveAssetBuffer(assetId).then((buffer) => {
+          this._pendingAssetPlaybacks.set(assetId, Math.max(0, (this._pendingAssetPlaybacks.get(assetId) || 1) - 1));
+          if (!buffer || !this.ctx || !this.master || !this.enabled) return;
+          this._playUploadedAssetBuffer(this.ctx, this.master, this.ctx.currentTime, assetId, buffer, pan, volume);
+        }).catch(() => {
+          this._pendingAssetPlaybacks.set(assetId, Math.max(0, (this._pendingAssetPlaybacks.get(assetId) || 1) - 1));
+        });
+      } else {
+        this._ensureLiveAssetBuffer(assetId).catch(() => {});
+      }
+    }
+    return false;
+  }
+
+  _autoGapPreset(ev) {
+    switch (ev && ev.gapOutcome) {
+      case 'burn': return 'burn';
+      case 'flyAway':
+      case 'launchUp':
+      case 'launchDown': return 'whoosh';
+      case 'destroy': return 'burst';
+      case 'shatter': return 'glass';
+      default: return 'zap';
+    }
+  }
+
+  _playConfiguredGapSound(ctx, dest, t0, ev, pan, step) {
+    if (!ev || !ev.gapSoundMode || ev.gapSoundMode === 'none') return false;
+    if (ev.gapSoundMode === 'preset') {
+      const preset = ev.gapSoundPreset || this._autoGapPreset(ev);
+      if (preset) return this._playPreset('gapPass', preset, ctx, dest, t0, ev, pan, step);
+      return false;
+    }
+    if (ev.gapSoundMode === 'upload') {
+      const assetId = ev.gapSoundAssetId || '';
+      const volume = ev.gapSoundVolume != null ? ev.gapSoundVolume : 1;
+      return this._playUploadedAsset(ctx, dest, t0, assetId, pan, volume);
+    }
+    return false;
+  }
+
   // --- Named voice presets ------------------------------------------------
   //
   // Every voice is self-contained and context-agnostic so it runs identically
@@ -343,11 +592,69 @@ class AudioEngine {
           e._blip(ctx, dest, t0, f * 1.5, { pan, gain: 0.28, attack: 0.001, decay: 0.08, wave: 'sine' });
           e._noise(ctx, dest, t0, { pan, decay: 0.06, gain: 0.25, lowpass: 1800 });
         },
+        piano: (e, ctx, dest, t0, ev, pan, step) => {
+          const f = e._midiToFreq(e._pickNote(step + 2));
+          e._blip(ctx, dest, t0, f, {
+            pan, gain: 0.28, attack: 0.002, decay: 0.30, wave: 'triangle',
+          });
+          e._blip(ctx, dest, t0 + 0.003, f * 2, {
+            pan, gain: 0.09, attack: 0.001, decay: 0.16, wave: 'sine',
+          });
+          e._noise(ctx, dest, t0, {
+            pan, decay: 0.035, gain: 0.018, lowpass: 2200,
+          });
+        },
+        pianoRise: (e, ctx, dest, t0, ev, pan, step) => {
+          const phrase = e._pianoRiseIndex++;
+          const root = 72 + Math.min(12, Math.floor((phrase % 24) / 6) * 2);
+          const offsets = [0, 4, 7, 12];
+          const notes = [
+            root + offsets[0],
+            root + offsets[1],
+            root + offsets[2 + (phrase % 2)],
+          ];
+          const baseGain = 0.125 + Math.min(0.045, (phrase % 8) * 0.006);
+          notes.forEach((note, i) => {
+            const f = e._midiToFreq(note);
+            e._pianoTone(ctx, dest, t0 + i * 0.055, f, {
+              pan,
+              gain: baseGain * (i === 0 ? 0.95 : i === 1 ? 0.82 : 0.74),
+              decay: 0.22 + i * 0.055,
+              detuneCents: 0,
+            });
+          });
+        },
         bell: (e, ctx, dest, t0, ev, pan, step) => {
           const f = e._midiToFreq(e._pickNote(step + 7));
           e._blip(ctx, dest, t0, f,     { pan, gain: 0.32, attack: 0.001, decay: 0.45, wave: 'sine' });
           e._blip(ctx, dest, t0, f * 2, { pan, gain: 0.14, attack: 0.003, decay: 0.35, wave: 'sine' });
           e._blip(ctx, dest, t0, f * 3, { pan, gain: 0.06, attack: 0.003, decay: 0.25, wave: 'sine' });
+        },
+        legendChime: (e, ctx, dest, t0, ev, pan) => {
+          // Based on the reference clip: a loud retro chime centered around
+          // A#/Bb4 (~466 Hz), with a detuned body and a bright arcade partial.
+          const body = [
+            { f: 466.2, g: 0.24, d: 0.46, w: 'sine', dt: 0.000 },
+            { f: 456.7, g: 0.14, d: 0.42, w: 'sine', dt: 0.002 },
+            { f: 430.0, g: 0.08, d: 0.36, w: 'triangle', dt: 0.004 },
+            { f: 493.9, g: 0.08, d: 0.34, w: 'triangle', dt: 0.005 },
+            { f: 932.4, g: 0.08, d: 0.25, w: 'sine', dt: 0.010 },
+            { f: 1306.0, g: 0.055, d: 0.22, w: 'sine', dt: 0.014 },
+          ];
+          for (const p of body) {
+            e._blip(ctx, dest, t0 + p.dt, p.f, {
+              pan, gain: p.g, attack: 0.0015, decay: p.d, wave: p.w,
+            });
+          }
+          e._noise(ctx, dest, t0, { pan, decay: 0.025, gain: 0.035, lowpass: 5200 });
+          // Short slap echoes create the recognizable "old arcade cabinet"
+          // bloom without needing an external sample.
+          e._blip(ctx, dest, t0 + 0.085, 466.2, {
+            pan, gain: 0.075, attack: 0.001, decay: 0.22, wave: 'sine',
+          });
+          e._blip(ctx, dest, t0 + 0.17, 466.2, {
+            pan, gain: 0.035, attack: 0.001, decay: 0.18, wave: 'sine',
+          });
         },
         soft: (e, ctx, dest, t0, ev, pan, step) => {
           const f = e._midiToFreq(e._pickNote(step));
@@ -483,6 +790,36 @@ class AudioEngine {
         },
         silent: () => {},
       },
+
+      gapPass: {
+        glass: (e, ctx, dest, t0, ev, pan) => {
+          e._noise(ctx, dest, t0, { pan, decay: 0.22, gain: 0.32, lowpass: 9000 });
+          e._shimmer(ctx, dest, t0, 0.28);
+          e._blip(ctx, dest, t0, 1900, { pan, gain: 0.18, attack: 0.001, decay: 0.07, wave: 'triangle' });
+        },
+        burst: (e, ctx, dest, t0, ev, pan, step) => {
+          const f = e._midiToFreq(e._pickNote(step - 2));
+          e._blip(ctx, dest, t0, f, { pan, gain: 0.45, attack: 0.001, decay: 0.18, wave: 'sawtooth' });
+          e._noise(ctx, dest, t0, { pan, decay: 0.16, gain: 0.22, lowpass: 1000 });
+        },
+        burn: (e, ctx, dest, t0, ev, pan, step) => {
+          const base = e._midiToFreq(e._pickNote(step));
+          e._sweep(ctx, dest, t0, {
+            pan, startFreq: base * 0.8, endFreq: base * 2.6, decay: 0.38, gain: 0.42,
+          });
+          e._noise(ctx, dest, t0, { pan, decay: 0.18, gain: 0.16, lowpass: 2600 });
+        },
+        whoosh: (e, ctx, dest, t0, ev, pan) => {
+          e._voices.escape.whoosh(e, ctx, dest, t0, ev, pan, 0);
+        },
+        zap: (e, ctx, dest, t0, ev, pan, step) => {
+          e._voices.escape.zap(e, ctx, dest, t0, ev, pan, step);
+        },
+        explode: (e, ctx, dest, t0, ev, pan) => {
+          e._voices.destroy.explode(e, ctx, dest, t0, ev, pan, 0);
+        },
+        silent: () => {},
+      },
     };
   }
 
@@ -521,6 +858,11 @@ class AudioEngine {
           // default bounce voice. 'silent' cleanly mutes this ball's hits.
           const override = ev.bounceSound || '';
           if (override) {
+            if (ev.bounceSoundOn === 'ballBall' && ev.source !== 'ballBall' && ev.source !== 'fixedBall') break;
+            if (String(override).startsWith('asset:')) {
+              this._playUploadedAsset(ctx, dest, t0, String(override).slice(6), pan, 1);
+              break;
+            }
             if (bouncePlayed < 3 || throttle('bounce', 0.045)) {
               this._playPreset('bounce', override, ctx, dest, t0, ev,
                                pan, step + bouncePlayed);
@@ -546,8 +888,12 @@ class AudioEngine {
           break;
         }
         case 'freeze': {
-          if (!throttle('freeze', 0.05)) break;
           const override = ev.deathSound || '';
+          if (String(override).startsWith('asset:')) {
+            this._playUploadedAsset(ctx, dest, t0, String(override).slice(6), pan, 1);
+            break;
+          }
+          if (!throttle('freeze', 0.05)) break;
           if (override && this._playPreset('freeze', override, ctx, dest, t0, ev, pan, step)) break;
           const base = this._midiToFreq(this._pickNote(step + 7));
           this._blip(ctx, dest, t0, base, {
@@ -570,6 +916,7 @@ class AudioEngine {
         }
         case 'destroy': {
           if (!throttle('destroy', 0.05)) break;
+          if (this._playConfiguredGapSound(ctx, dest, t0, ev, pan, step)) break;
           const override = ev.destroySound || '';
           if (override && this._playPreset('destroy', override, ctx, dest, t0, ev, pan, step)) break;
           const freq = this._midiToFreq(this._pickNote(step - 7));
@@ -581,12 +928,19 @@ class AudioEngine {
         }
         case 'escape': {
           if (!throttle('escape', 0.25)) break;
+          if (this._playConfiguredGapSound(ctx, dest, t0, ev, pan, step)) break;
           const override = ev.escapeSound || '';
           if (override && this._playPreset('escape', override, ctx, dest, t0, ev, pan, step)) break;
           const base = this._midiToFreq(this._pickNote(step));
           this._sweep(ctx, dest, t0, {
             pan, startFreq: base, endFreq: base * 4, decay: 0.7, gain: 0.5,
           });
+          break;
+        }
+        case 'gapPass': {
+          if (!throttle('gapPass', 0.06)) break;
+          if (this._playConfiguredGapSound(ctx, dest, t0, ev, pan, step)) break;
+          this._playPreset('gapPass', this._autoGapPreset(ev), ctx, dest, t0, ev, pan, step);
           break;
         }
         case 'spawn': {
@@ -661,9 +1015,12 @@ class AudioEngine {
   // `kind` is 'bounce'|'escape'|'destroy'|'freeze'; `name` is a registry key
   // (e.g. 'chirp'). Empty/unknown names play the default behavior for that
   // kind so the user can preview what a blank dropdown will sound like.
-  previewEventSound(kind, name) {
+  async previewEventSound(kind, name, options = {}) {
     this.ensureReady();
     if (!this._ready) return;
+    if (options.gapSoundMode === 'upload' && options.gapSoundAssetId) {
+      await this._ensureLiveAssetBuffer(options.gapSoundAssetId);
+    }
     const ctx = this.ctx;
     const t0 = ctx.currentTime + 0.03;
     const W = 1080, H = 1920;
@@ -672,6 +1029,13 @@ class AudioEngine {
     if (kind === 'escape')  ev.escapeSound  = name || '';
     if (kind === 'destroy') ev.destroySound = name || '';
     if (kind === 'freeze')  ev.deathSound   = name || '';
+    if (kind === 'gapPass') {
+      ev.gapOutcome = options.gapOutcome || 'shatter';
+      ev.gapSoundMode = options.gapSoundMode || (options.gapSoundAssetId ? 'upload' : 'preset');
+      ev.gapSoundPreset = name || options.gapSoundPreset || '';
+      ev.gapSoundAssetId = options.gapSoundAssetId || '';
+      ev.gapSoundVolume = options.gapSoundVolume != null ? options.gapSoundVolume : 1;
+    }
     // Use a fresh throttle map so rapid preview clicks aren't swallowed.
     this._dispatchEvents(ctx, this.master, t0, [ev], W, H, new Map());
   }
@@ -761,7 +1125,28 @@ class AudioEngine {
     const offlineVolume = this.volume > 0.001 ? this.volume : 0.35;
     const { master } = this._buildMasterChain(offline, offlineVolume);
     const savedMelodyIndex = this._melodyIndex;
+    const savedAssetBuffers = this._activeAssetBuffers;
+    const savedAssetPlaybackWindows = this._assetPlaybackWindows;
     this.resetTimelineState();
+
+    const assetIds = new Set();
+    for (const entry of timedEvents) {
+      for (const ev of entry.events || []) {
+        if (ev && ev.gapSoundMode === 'upload' && ev.gapSoundAssetId) assetIds.add(ev.gapSoundAssetId);
+        if (ev && typeof ev.bounceSound === 'string' && ev.bounceSound.startsWith('asset:')) {
+          assetIds.add(ev.bounceSound.slice(6));
+        }
+        if (ev && typeof ev.deathSound === 'string' && ev.deathSound.startsWith('asset:')) {
+          assetIds.add(ev.deathSound.slice(6));
+        }
+      }
+    }
+    const offlineAssetBuffers = new Map();
+    for (const assetId of assetIds) {
+      const buffer = await this._decodeAssetForContext(offline, assetId);
+      if (buffer) offlineAssetBuffers.set(assetId, buffer);
+    }
+    this._activeAssetBuffers = offlineAssetBuffers;
 
     const throttle = new Map();
 
@@ -780,6 +1165,8 @@ class AudioEngine {
 
     const rendered = await offline.startRendering();
     this._melodyIndex = savedMelodyIndex;
+    this._activeAssetBuffers = savedAssetBuffers;
+    this._assetPlaybackWindows = savedAssetPlaybackWindows;
     return rendered;
   }
 }

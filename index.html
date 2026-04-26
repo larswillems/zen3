@@ -47,17 +47,32 @@
         <span class="unit">to</span>
         <input id="seed-find-max" type="number" min="0" max="999999" step="1" value="12" />
         <label>Start</label>
-        <input id="seed-find-start" type="text" value="" placeholder="current" />
+        <input id="seed-find-start" type="text" value="0" placeholder="0" />
         <label>Max</label>
-        <input id="seed-find-limit" type="number" min="1" max="1000000" step="1" value="200000" />
+        <input id="seed-find-limit" type="number" min="1" max="1000000" step="1" value="2000" />
         <button id="btn-find-seeds" title="Find matching seeds">🔎 Find</button>
         <button id="btn-stop-seeds" title="Stop seed search" disabled>Stop</button>
       </div>
 
       <div class="group">
         <label>Seed list</label>
+        <label>Sort</label>
+        <select id="seed-results-sort">
+          <option value="match">Best match</option>
+          <option value="seedAsc">Seed ↑</option>
+          <option value="seedDesc">Seed ↓</option>
+          <option value="endSecondsAsc">End seconds ↑</option>
+          <option value="endSecondsDesc">End seconds ↓</option>
+          <option value="ballsUsedDesc">Balls used ↓</option>
+          <option value="peakActiveBallsDesc">Peak balls ↓</option>
+          <option value="ballCollisionCountDesc">Ball collisions ↓</option>
+          <option value="circleBounceCountDesc">Circle hits ↓</option>
+          <option value="melodyHitCountDesc">Melody hits ↓</option>
+          <option value="spreadScoreDesc">Spread score ↓</option>
+        </select>
         <button id="btn-seed-prev" title="Previous seed">◀</button>
         <select id="seed-results"></select>
+        <button id="btn-seed-results-toggle" title="Expand seed list">▾</button>
         <button id="btn-seed-next" title="Next seed">▶</button>
         <div id="seed-result-actions"></div>
       </div>
@@ -74,7 +89,7 @@
 
       <div class="group">
         <label>Speed</label>
-        <input id="speed-slider" type="range" min="0.25" max="200" step="0.05" value="1" />
+        <input id="speed-slider" type="range" min="0.01" max="200" step="0.01" value="1" />
         <span id="speed-label" class="readout">1.00x</span>
       </div>
 
@@ -98,7 +113,8 @@
 
   <main class="layout">
     <!-- LEFT PANEL: object builder + symmetry spawner + physics/overlay/export -->
-    <aside class="panel left">
+    <aside class="panel left" id="left-panel">
+      <div class="panel-scroll">
       <h2>Presets</h2>
       <div class="add-grid">
         <button id="preset-harmonic" class="preset">Harmonic Orbits</button>
@@ -106,9 +122,45 @@
         <button id="preset-twinkle" class="preset">Twinkle Bounce</button>
         <button id="preset-escape" class="preset">Chaos Theory</button>
         <button id="preset-onehp" class="preset">1 HP to Escape</button>
+        <button id="preset-onechance-4" class="preset">One Chance 4+1</button>
+        <button id="preset-onechance-6" class="preset">One Chance 6+1</button>
+        <button id="preset-onechance-8" class="preset">One Chance 8+1</button>
+        <button id="preset-gap-static-1" class="preset">Gap Static 1</button>
+        <button id="preset-gap-static-2" class="preset">Gap Static 2</button>
+        <button id="preset-gap-static-3" class="preset">Gap Static 3</button>
+        <button id="preset-gap-static-4" class="preset">Gap Static 4</button>
+        <button id="preset-gap-static-5" class="preset">Gap Static 5</button>
+        <button id="preset-gap-static-6" class="preset">Gap Static 6</button>
+        <button id="preset-gap-rotate-pass" class="preset">Gap Pass Rotate</button>
+        <button id="preset-gap-rotate-graze" class="preset">Gap Graze Rotate</button>
         <button id="preset-timed" class="preset">4 Sec to Escape</button>
         <button id="preset-timed3" class="preset">3 Sec to Escape</button>
+        <button id="preset-burning-rings" class="preset">Burning Rings</button>
         <button id="preset-plinko" class="preset">Pyramid Plinko</button>
+        <button id="preset-neon-pinball" class="preset">Neon Pinball</button>
+        <button id="preset-classic-pinball" class="preset">Classic Pinball</button>
+        <button id="preset-easter" class="preset">Paasei Plinko</button>
+        <button id="preset-easter-orbit" class="preset">Egg Hunt Orbit</button>
+        <button id="preset-memory" class="preset">Memory Maze</button>
+        <button id="preset-rhythm" class="preset">Rhythm Drop</button>
+        <button id="preset-prediction" class="preset">Prediction Gates</button>
+        <button id="preset-legend-spikes" class="preset">Last To Survive</button>
+        <button id="preset-giant-marbles" class="preset">Giant Marble Gauntlet</button>
+        <button id="preset-spinner-storm" class="preset">Spinner Storm</button>
+        <button id="preset-branch-maze-a" class="preset">Repo Maze A</button>
+        <button id="preset-branch-maze-b" class="preset">Repo Maze B</button>
+        <button id="preset-branch-maze-c" class="preset">Repo Maze C</button>
+        <button id="preset-branch-maze-d" class="preset">Repo Maze D</button>
+        <button id="preset-branch-maze-tower" class="preset">The Long Way Out</button>
+        <button id="preset-branch-maze-tower-b" class="preset">The Long Way Out II</button>
+        <button id="preset-branch-maze-tower-c" class="preset">The Long Way Out III</button>
+        <button id="preset-branch-maze-tower-d" class="preset">The Long Way Out IV</button>
+        <button id="preset-branch-maze-tower-e" class="preset">The Long Way Out V</button>
+        <button id="preset-branch-maze-count" class="preset">Balls to Escape</button>
+        <button id="preset-branch-maze-count-b" class="preset">Balls to Escape II</button>
+        <button id="preset-branch-maze-count-c" class="preset">Balls to Escape III</button>
+        <button id="preset-branch-maze-count-d" class="preset">Balls to Escape IV</button>
+        <button id="preset-branch-maze-count-e" class="preset">Balls to Escape V</button>
         <button id="preset-wobble" class="preset">Liquid Wobble Demo</button>
       </div>
 
@@ -120,6 +172,9 @@
         <button data-add="arc">Arc</button>
         <button data-add="spiral">Spiral</button>
         <button data-add="spikes">Spikes</button>
+        <button data-add="spinner">Spinner</button>
+        <button data-add="booster">Booster</button>
+        <button data-add="flipper">Flipper</button>
         <button data-add="spawner">Spawner</button>
         <button data-add="score-bin">Score Bin</button>
       </div>
@@ -167,9 +222,23 @@
 
       <h2>Loop Tools</h2>
       <button id="btn-snap-rotations" class="full">Snap all rotations to loop</button>
+      <div id="branch-maze-controls" hidden>
+        <h2>Branch Maze</h2>
+        <div class="prop-row">
+          <label>Maze rotation</label>
+          <input id="branch-maze-rotation" type="range" min="-1.5" max="1.5" step="0.01" value="0" />
+          <span id="branch-maze-rotation-label" class="readout">0.00</span>
+        </div>
+      </div>
 
-      <h2>Outline</h2>
+      <div class="section-header">
+        <h2>Outline</h2>
+        <button id="btn-random-colors" class="mini section-action" title="Generate a random color combo">Random colors</button>
+      </div>
       <ul id="outline-list" class="outline"></ul>
+
+      <h2>Text</h2>
+      <ul id="text-outline-list" class="outline"></ul>
 
       <h2>Events</h2>
       <div id="events-list" class="events-list"></div>
@@ -252,6 +321,26 @@
       <div class="prop-row">
         <label><input id="vs-pulse" type="checkbox" checked /> Breathing pulse</label>
       </div>
+      <div class="prop-row">
+        <label>Freeze glow</label>
+        <input id="vs-freeze-glow-color" type="color" value="#bae6fd" />
+      </div>
+      <div class="prop-row">
+        <label>Freeze rim</label>
+        <input id="vs-freeze-rim-color" type="color" value="#e0f2fe" />
+      </div>
+      <div class="prop-row">
+        <label>Freeze opacity</label>
+        <input id="vs-freeze-opacity" type="range" min="0" max="1" step="0.05" value="0.75" />
+      </div>
+      <div class="prop-row">
+        <label>Freeze specks</label>
+        <input id="vs-freeze-speck-count" type="number" min="0" max="12" step="1" value="3" />
+      </div>
+      <div class="prop-row">
+        <label>Freeze speck color</label>
+        <input id="vs-freeze-speck-color" type="color" value="#e0f2fe" />
+      </div>
 
       <h2>Overlay</h2>
       <div class="prop-row">
@@ -303,20 +392,20 @@
         </select>
       </div>
       <h2>Export</h2>
-      <div class="prop-row">
-        <label>Max (s)</label>
-        <input id="export-duration" type="number" min="1" max="120" step="0.5" value="30" />
-      </div>
       <div class="hint small">
         Rendering happens in the <b>background</b> (offscreen) at a steady
         60 fps, independent of how fast your tab runs. Each preset defines
         its own end condition — e.g. "1 HP to Escape" stops a few seconds
-        after the first ball escapes, right when the shatter fades out. The
-        Max value above is just a hard safety cap.
+        after the first ball escapes, right when the shatter fades out. Use
+        Stop render if you want to abort a long export.
       </div>
       <div class="export-buttons">
         <button id="btn-export-webm" class="primary">🎬 Render MP4 (background)</button>
+        <button id="btn-queue-export-webm">➕ Queue MP4</button>
         <button id="btn-export-frames">🖼 Render PNG frames</button>
+        <button id="btn-queue-export-frames">➕ Queue PNG frames</button>
+        <button id="btn-start-export-queue">▶ Start queued renders</button>
+        <button id="btn-stop-export" class="danger" hidden>Stop render</button>
       </div>
       <div id="export-status" class="status"></div>
       <div class="hint small">
@@ -326,23 +415,36 @@
         same frame as its visual. PNG frames come with <code>manifest.json</code>
         and a ready-to-run FFmpeg command (see <code>export_video.py</code>).
       </div>
+      </div>
+      <div id="left-panel-resizer" class="panel-resizer" title="Drag to resize panel"></div>
     </aside>
 
     <!-- CENTER: 9:16 canvas -->
     <section class="stage">
-      <div class="canvas-frame">
-        <canvas id="sim-canvas"></canvas>
+      <div class="stage-content">
+        <div class="canvas-frame">
+          <canvas id="sim-canvas"></canvas>
+        </div>
+        <aside class="stage-feedback" aria-label="Live run feedback">
+          <div class="stage-feedback-card">
+            <div class="stage-feedback-label">Current run</div>
+            <div id="live-run-time" class="stage-feedback-time">0:00.00</div>
+          </div>
+        </aside>
       </div>
     </section>
 
     <!-- RIGHT PANEL: properties -->
-    <aside class="panel right">
-      <h2>Properties</h2>
-      <div id="properties"></div>
-      <div class="keys hint small">
-        <div><kbd>Click</kbd> select · <kbd>Drag</kbd> move</div>
-        <div><kbd>D</kbd> duplicate · <kbd>Del</kbd> delete</div>
-        <div>Orbit balls drag their <b>orbit center</b>.</div>
+    <aside class="panel right" id="right-panel">
+      <div id="right-panel-resizer" class="panel-resizer panel-resizer-left" title="Drag to resize panel"></div>
+      <div class="panel-scroll">
+        <h2>Properties</h2>
+        <div id="properties"></div>
+        <div class="keys hint small">
+          <div><kbd>Click</kbd> select · <kbd>Drag</kbd> move</div>
+          <div><kbd>D</kbd> duplicate · <kbd>Del</kbd> delete</div>
+          <div>Orbit balls drag their <b>orbit center</b>.</div>
+        </div>
       </div>
     </aside>
   </main>

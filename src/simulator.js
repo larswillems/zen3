@@ -8,6 +8,86 @@
 //   - Helpers snap rotation speeds / orbit periods to clean ratios so the
 //     final frame equals the first frame.
 
+function getScenarioRuleActions(rule) {
+  if (rule && Array.isArray(rule.actions)) return rule.actions.filter((action) => action && typeof action === 'object');
+  if (rule && rule.action && typeof rule.action === 'object') return [rule.action];
+  return [];
+}
+
+function ruleHasActionType(rule, type) {
+  return getScenarioRuleActions(rule).some((action) => action && action.type === type);
+}
+
+function normalizeScenarioFinishActions(sc) {
+  if (!sc || !Array.isArray(sc.events)) return sc;
+  for (const rule of sc.events) {
+    for (const action of getScenarioRuleActions(rule)) {
+      if (action && action.type === 'finish' && action.seconds == null) action.seconds = 1.5;
+    }
+  }
+  return sc;
+}
+
+function makeUniqueScenarioRuleId(rules, base) {
+  const used = new Set((rules || []).map((rule) => String(rule && rule.id ? rule.id : '')));
+  let id = base;
+  let n = 2;
+  while (used.has(id)) {
+    id = `${base}_${n++}`;
+  }
+  return id;
+}
+
+function upgradeLegacyFinishFlow(sc) {
+  if (!sc || !Array.isArray(sc.events)) return sc;
+  if (sc.events.some((rule) =>
+    (rule && rule.trigger && rule.trigger.type === 'finish') || ruleHasActionType(rule, 'finish')
+  )) {
+    return sc;
+  }
+  const ec = sc.endCondition || null;
+  const applyUpgrade = (sourceTrigger, matchesRule) => {
+    let converted = false;
+    for (const rule of sc.events) {
+      if (!rule || !rule.trigger || !matchesRule(rule.trigger)) continue;
+      rule.trigger = { type: 'finish' };
+      converted = true;
+    }
+    if (!converted) return;
+    sc.events.unshift({
+      id: makeUniqueScenarioRuleId(sc.events, 'finish_start'),
+      once: true,
+      trigger: sourceTrigger,
+      action: { type: 'finish', seconds: 1.5 },
+    });
+    sc.endCondition = { type: 'finish' };
+    sc.stopOnFirstEscape = false;
+  };
+
+  if (ec && ec.type === 'firstEscapeTail') {
+    applyUpgrade({ type: 'firstEscape' }, (trigger) => trigger && trigger.type === 'firstEscape');
+  } else if (ec && ec.type === 'ballCountTail') {
+    const count = Math.max(0, ec.count | 0);
+    applyUpgrade(
+      { type: 'ballCount', count },
+      (trigger) => trigger && trigger.type === 'ballCount' && Math.max(0, trigger.count | 0) === count,
+    );
+  } else if (ec && ec.type === 'bucketHitTail') {
+    const bucketId = String(ec.bucketId || '');
+    applyUpgrade(
+      { type: 'bucketHit', bucketId },
+      (trigger) => trigger && trigger.type === 'bucketHit' && String(trigger.bucketId || '') === bucketId,
+    );
+  } else if (ec && ec.type === 'allBallsGone') {
+    applyUpgrade({ type: 'allGone' }, (trigger) => trigger && trigger.type === 'allGone');
+  }
+  return sc;
+}
+
+function clonePlainData(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 class Simulator {
   constructor() {
     this.scenario = this._defaultScenario();
@@ -19,6 +99,16 @@ class Simulator {
   }
 
   _defaultScenario() {
+    const defaultVisuals = {
+      glow: 1.0,
+      pulse: true,
+      freezeKeepAppearance: false,
+      freezeGlowColor: '#bae6fd',
+      freezeRimColor: '#e0f2fe',
+      freezeOpacity: 0.75,
+      freezeSpeckColor: '#e0f2fe',
+      freezeSpeckCount: 3,
+    };
     return {
       seed: 12345,
       version: 2,
@@ -28,32 +118,97 @@ class Simulator {
       satisfying: true,
       physics: { gravity: 0, friction: 0 },
       overlay: { title: '', showTimer: false, showCounter: false, showScore: false },
-      visuals: { glow: 1.0, pulse: true },
+      visuals: { ...defaultVisuals },
       objects: [],
       events: [],                // event-rule list: trigger -> action
+      soundAssets: {},
       randomMode: false,
       stopOnFirstEscape: false,
     };
   }
 
   setScenario(scenario) {
+    const defaultVisuals = {
+      glow: 1.0,
+      pulse: true,
+      freezeKeepAppearance: false,
+      freezeGlowColor: '#bae6fd',
+      freezeRimColor: '#e0f2fe',
+      freezeOpacity: 0.75,
+      freezeSpeckColor: '#e0f2fe',
+      freezeSpeckCount: 3,
+    };
     const sc = JSON.parse(JSON.stringify(scenario));
     if (sc.loopDuration == null) sc.loopDuration = sc.duration || 10;
     if (sc.duration == null) sc.duration = sc.loopDuration;
     if (sc.satisfying == null) sc.satisfying = false;
-    if (!sc.visuals) sc.visuals = { glow: 1.0, pulse: true };
+    sc.visuals = { ...defaultVisuals, ...(sc.visuals || {}) };
     if (!sc.physics) sc.physics = { gravity: 0, friction: 0 };
     if (!sc.overlay) sc.overlay = { title: '', showTimer: false, showCounter: false, showScore: false };
     if (!Array.isArray(sc.events)) sc.events = [];
+    if (!sc.soundAssets || typeof sc.soundAssets !== 'object') sc.soundAssets = {};
+    upgradeLegacyFinishFlow(sc);
+    normalizeScenarioFinishActions(sc);
+    for (const obj of sc.objects || []) {
+      if (!obj || typeof obj !== 'object') continue;
+      if (obj.type === 'circle' || obj.type === 'arc' || obj.type === 'spiral' || obj.type === 'spikes') {
+        obj.onGapPass = window.defaultGapPassConfig ? window.defaultGapPassConfig(obj.onGapPass || {}) : (obj.onGapPass || {});
+      }
+      if (obj.type === 'arc' && obj.insideOnly == null) obj.insideOnly = false;
+    }
     this.scenario = sc;
+    if (typeof window !== 'undefined') {
+      const debugCfg = sc && sc.debug && sc.debug.collision;
+      const prev = window.__collisionDebug;
+      if (debugCfg && debugCfg.enabled) {
+        window.__collisionDebug = {
+          enabled: true,
+          maxLogs: Math.max(0, debugCfg.maxLogs != null ? debugCfg.maxLogs : 1200),
+          toConsole: debugCfg.toConsole !== false,
+          verboseGap: !!debugCfg.verboseGap,
+          _fromScenario: true,
+        };
+        window.__collisionDebugLogs = [];
+      } else if (prev && prev._fromScenario) {
+        window.__collisionDebug = false;
+        window.__collisionDebugLogs = [];
+      }
+    }
     this.rebuild();
   }
 
   getScenario() {
+    const scenario = clonePlainData(this.scenario);
+    scenario.objects = (this.scenario.objects || []).map((o) => clonePlainData(serializeObject(o)));
+    return scenario;
+  }
+
+  createSnapshot() {
     return {
-      ...this.scenario,
-      objects: this.scenario.objects.map((o) => serializeObject(o)),
+      scenario: this.getScenario(),
+      state: JSON.parse(JSON.stringify(this.state)),
+      initialObjects: JSON.parse(JSON.stringify(this._initialObjects || [])),
+      rng: this.rng ? { seed: this.rng.seed, state: this.rng.state } : null,
     };
+  }
+
+  static fromSnapshot(snapshot) {
+    const sim = new Simulator();
+    if (!snapshot || !snapshot.scenario) return sim;
+    sim.setScenario(snapshot.scenario);
+    if (Array.isArray(snapshot.initialObjects)) {
+      sim._initialObjects = JSON.parse(JSON.stringify(snapshot.initialObjects));
+    }
+    if (snapshot.state) {
+      sim.state = JSON.parse(JSON.stringify(snapshot.state));
+    }
+    if (snapshot.rng) {
+      sim.rng = new SeededRNG(snapshot.rng.seed);
+      sim.rng.state = snapshot.rng.state >>> 0;
+    }
+    sim.physics = new Physics(sim.scenario.physics);
+    sim.physics.events = [];
+    return sim;
   }
 
   setSeed(seed) {
@@ -203,7 +358,18 @@ class Simulator {
       time: 0,
       elapsedTime: 0,
       score: 0,
+      ballsUsedCount: this._initialObjects.filter((o) => o && o.type === 'ball').length,
     };
+
+    const initDirRng = this.rng.fork(17);
+    for (const obj of this.state.objects) {
+      if (obj.type !== 'ball' || obj.motion !== 'physics' || !obj.randomInitDir) continue;
+      const speed = Math.hypot(obj.vx || 0, obj.vy || 0);
+      if (speed <= 1e-6) continue;
+      const angle = initDirRng.angle();
+      obj.vx = Math.cos(angle) * speed;
+      obj.vy = Math.sin(angle) * speed;
+    }
 
     // Pre-roll: if any balls use parametric motion we step once at t=0 so
     // their positions match their orbit formula before the first render.
@@ -223,6 +389,17 @@ class Simulator {
 
   step(dt) {
     this.physics.step(this.state, dt);
+    const authoredBallCount = (this.scenario.objects || [])
+      .filter((o) => o && o.type === 'ball')
+      .length;
+    const spawnedBallCount = (this.state.objects || [])
+      .filter((o) => o && o.type === 'spawner')
+      .reduce((sum, spawner) => sum + Math.max(0, spawner._spawnCount || 0), 0);
+    this.state.ballsUsedCount = Math.max(
+      this.state.ballsUsedCount || 0,
+      authoredBallCount + spawnedBallCount,
+      this.state.objects.filter((o) => o && o.type === 'ball').length,
+    );
     this.state.elapsedTime = (this.state.elapsedTime || 0) + dt;
     // Wrap loop time to keep floating-point error from drifting over long runs.
     // We do NOT clear trails: for orbit balls the path repeats exactly each

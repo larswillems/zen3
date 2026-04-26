@@ -24,6 +24,17 @@ function normalizeAngle(a) {
   return a;
 }
 
+function shortestAngleDelta(from, to) {
+  let delta = normalizeAngle(to) - normalizeAngle(from);
+  if (delta > Math.PI) delta -= Math.PI * 2;
+  if (delta < -Math.PI) delta += Math.PI * 2;
+  return delta;
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
 // Returns true if angle `a` (radians) lies inside a gap whose center rotates
 // with `rotation` and spans `gapSize` radians.
 function angleInGap(a, gapStart, gapSize, rotation) {
@@ -31,20 +42,109 @@ function angleInGap(a, gapStart, gapSize, rotation) {
   const start = normalizeAngle(gapStart + rotation);
   const end = normalizeAngle(start + gapSize);
   a = normalizeAngle(a);
-  if (start <= end) return a >= start && a <= end;
-  return a >= start || a <= end;
+  const edgeEps = 1e-4;
+  if (start <= end) return a > start + edgeEps && a < end - edgeEps;
+  return a > start + edgeEps || a < end - edgeEps;
 }
 
-function ballFitsCircleGap(ball, c, time = 0, angle = null) {
+function ballFitsCircleGap(ball, c, time = 0, angle = null, rotationOverride = null) {
   const rawGap = effectiveCircleGapSize(c, time);
   if (rawGap <= 0) return false;
-  const clearanceRadius = Math.max(1, (c.radius || 0) - ((c.thickness || 0) * 0.5));
+  // The ball's center has to clear the radial gap edges at the INNERMOST part
+  // of the ring band, where the angular clearance is tightest. Using the bare
+  // ring radius here is too generous and can let a ball clip the gap border.
+  const clearanceRadius = Math.max(
+    1e-6,
+    (c.radius || 0) - ((c.thickness || 0) * 0.5) - (ball.radius || 0),
+  );
   const ratio = Math.max(0, Math.min(0.999999, (ball.radius || 0) / clearanceRadius));
   const angularPad = Math.asin(ratio);
-  const usableGap = rawGap - angularPad * 2;
+  const edgeSafety = Math.max(0.0025, Math.min(0.02, 0.8 / clearanceRadius));
+  const totalPad = angularPad + edgeSafety;
+  const usableGap = rawGap - totalPad * 2;
   if (usableGap <= 1e-6) return false;
   const a = angle != null ? angle : Math.atan2((ball.y || 0) - (c.y || 0), (ball.x || 0) - (c.x || 0));
-  return angleInGap(a, c.gapStart + angularPad, usableGap, c.rotation || 0);
+  const rotation = rotationOverride != null ? rotationOverride : (c.rotation || 0);
+  return angleInGap(a, c.gapStart + totalPad, usableGap, rotation);
+}
+
+function ballSweepsThroughCircleGap(ball, c, time = 0, prevAngle = null, angle = null, prevRotation = null, rotation = null, debug = null) {
+  const currentRotation = rotation != null ? rotation : (c.rotation || 0);
+  const previousRotation = prevRotation != null
+    ? prevRotation
+    : (c._prevRotation != null ? c._prevRotation : currentRotation);
+  const prevX = (ball._prevX != null ? ball._prevX : ball.x) - (c.x || 0);
+  const prevY = (ball._prevY != null ? ball._prevY : ball.y) - (c.y || 0);
+  const currX = (ball.x || 0) - (c.x || 0);
+  const currY = (ball.y || 0) - (c.y || 0);
+  const prevDist = Math.hypot(prevX, prevY);
+  const currDist = Math.hypot(currX, currY);
+  const innerLimit = Math.max(1e-6, (c.radius || 0) - ((c.thickness || 0) * 0.5) - (ball.radius || 0));
+  const outerLimit = Math.max(innerLimit + 1e-6, (c.radius || 0) + ((c.thickness || 0) * 0.5) + (ball.radius || 0));
+  const intervals = circleBandIntervalsOnSegment(prevX, prevY, currX, currY, innerLimit, outerLimit);
+  if (!intervals.length) {
+    if (typeof debug === 'function') debug({ result: 'noBandInterval' });
+    return false;
+  }
+  const traversal = selectCircleGapTraversalInterval(intervals, prevDist, currDist, innerLimit, outerLimit);
+  if (!traversal) {
+    if (typeof debug === 'function') debug({ result: 'noTraversal' });
+    return false;
+  }
+  const rotationDelta = shortestAngleDelta(previousRotation, currentRotation);
+  const motionLen = Math.hypot(currX - prevX, currY - prevY);
+  const sampleCount = Math.max(
+    13,
+    Math.min(81, gapTraversalSampleCount(ball, c, traversal.start, traversal.end, motionLen, rotationDelta) * 2),
+  );
+  const samples = sampleIntervalTimes(traversal.start, traversal.end, sampleCount);
+  for (const t of samples) {
+    const px = lerp(prevX, currX, t);
+    const py = lerp(prevY, currY, t);
+    const sampleAngle = Math.atan2(py, px);
+    const sampleRotation = previousRotation + rotationDelta * t;
+    if (!ballFitsCircleGap(ball, c, time, sampleAngle, sampleRotation)) {
+      if (typeof debug === 'function') {
+        debug({
+          result: 'sampleBlocked',
+          t,
+          px,
+          py,
+          sampleAngle,
+          sampleRotation,
+          sampleCount,
+        });
+      }
+      return false;
+    }
+  }
+  // `_collideCircleGapEdges()` already resolves actual radial-edge contacts with
+  // zero extra slack before we get here. Using an additional positive margin in
+  // the pass-check makes near-miss trajectories bounce even when the ball does
+  // not truly touch the edge.
+  const edgeHit = findCircleGapEdgeContact(ball, c, time, 0);
+  if (edgeHit) {
+    if (typeof debug === 'function') {
+      debug({
+        result: 'edgeContact',
+        sampleCount,
+        edgeIndex: edgeHit.edgeIndex,
+        edgeAngle: edgeHit.edgeAngle,
+        edgeDist: edgeHit.dist,
+        edgeT: edgeHit.t,
+      });
+    }
+    return false;
+  }
+  if (typeof debug === 'function') {
+    debug({
+      result: 'pass',
+      sampleCount,
+      traversalStart: traversal.start,
+      traversalEnd: traversal.end,
+    });
+  }
+  return true;
 }
 
 function effectiveCircleGapSize(c, time = 0) {
@@ -80,15 +180,17 @@ class Physics {
   }
 
   _collisionDebugOptions() {
-    const fallback = { enabled: true, maxLogs: 180, toConsole: true };
+    const fallback = { enabled: false, maxLogs: 180, toConsole: true };
     if (typeof window === 'undefined') return fallback;
     const user = window.__collisionDebug;
     if (user === false) return { enabled: false, maxLogs: 0, toConsole: false };
-    if (user === true || user == null) return fallback;
+    if (user === true) return { enabled: true, maxLogs: fallback.maxLogs, toConsole: true };
+    if (user == null) return fallback;
     return {
       enabled: user.enabled !== false,
       maxLogs: Math.max(0, user.maxLogs != null ? user.maxLogs : fallback.maxLogs),
       toConsole: user.toConsole !== false,
+      verboseGap: !!user.verboseGap,
     };
   }
 
@@ -116,6 +218,15 @@ class Physics {
         console.warn(`[physics] collision debug log limit reached (${opts.maxLogs}). Set window.__collisionDebug = { maxLogs: N } to capture more.`);
       }
     }
+  }
+
+  _verboseGapDebugEnabled() {
+    return !!this._collisionDebugOptions().verboseGap;
+  }
+
+  _debugGap(kind, payload) {
+    if (!this._verboseGapDebugEnabled()) return;
+    this._debugCollision(kind, payload);
   }
 
   _spawnerDebugOptions() {
@@ -180,6 +291,434 @@ class Physics {
       }
     }
     return best;
+  }
+
+  _getGapPassConfig(obj) {
+    const cfg = obj && obj.onGapPass;
+    if (!cfg || !cfg.enabled) return null;
+    return {
+      enabled: true,
+      outcome: cfg.outcome || 'escape',
+      particleStyle: cfg.particleStyle || 'auto',
+      removeObjectOnPass: !!cfg.removeObjectOnPass,
+      soundMode: cfg.soundMode || 'none',
+      soundPreset: cfg.soundPreset || 'glass',
+      soundAssetId: cfg.soundAssetId || '',
+      soundVolume: cfg.soundVolume != null ? Math.max(0, Math.min(2, cfg.soundVolume)) : 1,
+    };
+  }
+
+  _buildGapSoundFields(cfg) {
+    if (!cfg) return {};
+    return {
+      gapSoundMode: cfg.soundMode || 'none',
+      gapSoundPreset: cfg.soundPreset || '',
+      gapSoundAssetId: cfg.soundAssetId || '',
+      gapSoundVolume: cfg.soundVolume != null ? cfg.soundVolume : 1,
+    };
+  }
+
+  _getCollisionHoleConfig(ball) {
+    if (!ball || !ball.collisionHoleEnabled) return null;
+    return {
+      enabled: true,
+      size: Math.max(0.05, Math.min(Math.PI * 2 - 0.05, ball.collisionHoleSize != null ? ball.collisionHoleSize : 0.42)),
+      target: ball.collisionHoleTarget || 'auto',
+      placement: ball.collisionHolePlacement || 'impact',
+      onCircle: !!ball.collisionHoleOnCircle,
+      onArc: !!ball.collisionHoleOnArc,
+      onSpikes: !!ball.collisionHoleOnSpikes,
+      onSpinner: !!ball.collisionHoleOnSpinner,
+      onBall: !!ball.collisionHoleOnBall,
+      onFixedBall: !!ball.collisionHoleOnFixedBall,
+    };
+  }
+
+  _collisionHoleEnabledForSource(cfg, sourceType) {
+    if (!cfg) return false;
+    switch (sourceType) {
+      case 'circle': return cfg.onCircle;
+      case 'arc': return cfg.onArc;
+      case 'spikes': return cfg.onSpikes;
+      case 'spinner': return cfg.onSpinner;
+      case 'ball': return cfg.onBall;
+      case 'fixedBall': return cfg.onFixedBall;
+      default: return false;
+    }
+  }
+
+  _collisionHoleCircles(state) {
+    const objects = state && Array.isArray(state.objects) ? state.objects : [];
+    return objects.filter((o) => o && o.type === 'circle' && !o._gapRemoved);
+  }
+
+  _collisionHoleContainingCircles(state, anchorX, anchorY, ballRadius = 0) {
+    const circles = this._collisionHoleCircles(state);
+    const margin = Math.max(6, ballRadius || 0);
+    return circles
+      .filter((circle) => {
+        const dist = Math.hypot(anchorX - circle.x, anchorY - circle.y);
+        return dist <= (circle.radius || 0) + (circle.thickness || 0) * 0.5 + margin;
+      })
+      .sort((a, b) => (a.radius || 0) - (b.radius || 0));
+  }
+
+  _pickCollisionHoleCircle(ball, source, state, cfg, info = {}) {
+    const circles = this._collisionHoleCircles(state);
+    if (!circles.length) return null;
+    const anchorX = info.anchorX != null ? info.anchorX : (ball.x || 0);
+    const anchorY = info.anchorY != null ? info.anchorY : (ball.y || 0);
+    const containing = this._collisionHoleContainingCircles(state, anchorX, anchorY, ball.radius || 0);
+    const nearest = circles.reduce((best, circle) => {
+      const d = Math.hypot(anchorX - circle.x, anchorY - circle.y);
+      if (!best || d < best.distance) return { circle, distance: d };
+      return best;
+    }, null);
+    const hitCircle = source && source.type === 'circle' ? source : null;
+    switch (cfg.target) {
+      case 'hitCircle':
+        return hitCircle;
+      case 'nearestCircle':
+        return nearest ? nearest.circle : null;
+      case 'innermostContainingCircle':
+        return containing[0] || null;
+      case 'outermostContainingCircle':
+        return containing.length ? containing[containing.length - 1] : null;
+      case 'auto':
+      default:
+        return hitCircle || containing[0] || (nearest ? nearest.circle : null);
+    }
+  }
+
+  _collisionHoleWorldAngle(circle, cfg, info = {}) {
+    const impactX = info.anchorX != null ? info.anchorX : circle.x;
+    const impactY = info.anchorY != null ? info.anchorY : circle.y;
+    const impactAngle = Math.atan2(impactY - circle.y, impactX - circle.x);
+    const incomingVx = Number.isFinite(info.incomingVx) ? info.incomingVx : 0;
+    const incomingVy = Number.isFinite(info.incomingVy) ? info.incomingVy : 0;
+    const incomingLen = Math.hypot(incomingVx, incomingVy);
+    switch (cfg.placement) {
+      case 'oppositeImpact':
+        return impactAngle + Math.PI;
+      case 'againstIncoming':
+        return incomingLen > 1e-6 ? Math.atan2(-incomingVy, -incomingVx) : impactAngle;
+      case 'withIncoming':
+        return incomingLen > 1e-6 ? Math.atan2(incomingVy, incomingVx) : impactAngle;
+      case 'impact':
+      default:
+        return impactAngle;
+    }
+  }
+
+  _applyCollisionHole(circle, cfg, worldAngle) {
+    if (!circle || !cfg) return false;
+    const size = Math.max(0.05, Math.min(Math.PI * 2 - 0.05, cfg.size || 0));
+    circle.gapSize = size;
+    circle.gapStart = normalizeAngle(worldAngle - (circle.rotation || 0) - size * 0.5);
+    if (circle.gapPulse && circle.gapMinSize > circle.gapSize) {
+      circle.gapMinSize = circle.gapSize;
+    }
+    return true;
+  }
+
+  _maybeCreateCollisionHole(ball, source, sourceType, state, info = {}) {
+    const cfg = this._getCollisionHoleConfig(ball);
+    if (!cfg || !this._collisionHoleEnabledForSource(cfg, sourceType)) return false;
+    const targetCircle = this._pickCollisionHoleCircle(ball, source, state, cfg, info);
+    if (!targetCircle) return false;
+    const worldAngle = this._collisionHoleWorldAngle(targetCircle, cfg, info);
+    if (!this._applyCollisionHole(targetCircle, cfg, worldAngle)) return false;
+    const x = info.anchorX != null ? info.anchorX : ball.x;
+    const y = info.anchorY != null ? info.anchorY : ball.y;
+    this.events.push({
+      type: 'collisionHole',
+      source: sourceType,
+      x,
+      y,
+      color: targetCircle.color || ball.color,
+      gapObjectId: targetCircle.id || null,
+      gapObjectType: 'circle',
+      gapObjectX: targetCircle.x != null ? targetCircle.x : null,
+      gapObjectY: targetCircle.y != null ? targetCircle.y : null,
+      gapObjectRadius: targetCircle.radius != null ? targetCircle.radius : null,
+      gapObjectThickness: targetCircle.thickness != null ? targetCircle.thickness : null,
+      gapSize: targetCircle.gapSize,
+      gapStart: targetCircle.gapStart,
+    });
+    return true;
+  }
+
+  _gapPassOnCooldown(ball, objectId, timeSec) {
+    if (!ball || !objectId) return false;
+    return ball._lastGapPassObjectId === objectId
+      && Math.abs((ball._lastGapPassTime || -Infinity) - timeSec) < 0.14;
+  }
+
+  _markGapPass(ball, objectId, timeSec) {
+    ball._lastGapPassObjectId = objectId || null;
+    ball._lastGapPassTime = timeSec || 0;
+  }
+
+  _handleGapPass(ball, object, state, info = {}) {
+    const cfg = this._getGapPassConfig(object);
+    if (!cfg) return false;
+    const now = state && state.elapsedTime != null ? state.elapsedTime : (state.time || 0);
+    if (this._gapPassOnCooldown(ball, object.id, now)) return false;
+    this._markGapPass(ball, object.id, now);
+    this._debugGap('gapPass', {
+      ballId: ball.id,
+      colliderId: object.id || null,
+      colliderType: object.type || null,
+      x: Number((ball.x || 0).toFixed(2)),
+      y: Number((ball.y || 0).toFixed(2)),
+      vx: Number((ball.vx || 0).toFixed(2)),
+      vy: Number((ball.vy || 0).toFixed(2)),
+      outcome: cfg.outcome,
+      time: now,
+    });
+
+    const sound = this._buildGapSoundFields(cfg);
+    const effect = cfg.particleStyle === 'auto' ? cfg.outcome : cfg.particleStyle;
+    const speed = Math.max(260, Math.hypot(ball.vx || 0, ball.vy || 0));
+    const dx = info.dx != null ? info.dx : ((ball.x || 0) - (object.x || 0));
+    const dy = info.dy != null ? info.dy : ((ball.y || 0) - (object.y || 0));
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = info.nx != null ? info.nx : dx / len;
+    const ny = info.ny != null ? info.ny : dy / len;
+
+    const baseEvent = {
+      x: ball.x,
+      y: ball.y,
+      color: (object && (object.color || (Array.isArray(object.gradientColors) && object.gradientColors[0]))) || ball.color,
+      gapObjectId: object.id || null,
+      gapObjectType: object.type || null,
+      gapObjectX: object.x != null ? object.x : null,
+      gapObjectY: object.y != null ? object.y : null,
+      gapObjectRadius: object.radius != null ? object.radius : null,
+      gapObjectThickness: object.thickness != null ? object.thickness : null,
+      gapOutcome: cfg.outcome,
+      gapEffect: effect,
+      ...sound,
+    };
+
+    if (cfg.removeObjectOnPass) {
+      object._gapRemoved = true;
+      baseEvent.gapRemoved = true;
+    }
+
+    if (cfg.outcome === 'escape') {
+      ball._escaped = true;
+      ball.alive = false;
+      if (ball.clearTrailOnDeath && ball._trail) ball._trail.length = 0;
+      this.events.push({
+        type: 'escape',
+        escapeSound: ball.escapeSound || '',
+        ...baseEvent,
+      });
+      return true;
+    }
+
+    if (cfg.outcome === 'destroy' || cfg.outcome === 'shatter' || cfg.outcome === 'burn') {
+      ball.alive = false;
+      if (ball.clearTrailOnDeath && ball._trail) ball._trail.length = 0;
+      this.events.push({
+        type: 'destroy',
+        destroySound: ball.destroySound || '',
+        destroyStyle: cfg.outcome,
+        ...baseEvent,
+      });
+      return true;
+    }
+
+    if (cfg.outcome === 'launchUp') {
+      ball.vx = nx * speed * 0.35;
+      ball.vy = -Math.max(420, speed * 1.15);
+    } else if (cfg.outcome === 'launchDown') {
+      ball.vx = nx * speed * 0.35;
+      ball.vy = Math.max(420, speed * 1.15);
+    } else {
+      const launchSpeed = Math.max(460, speed * 1.1);
+      ball.vx = nx * launchSpeed;
+      ball.vy = ny * launchSpeed - Math.abs(ny) * 120;
+    }
+    this._clampBallSpeed(ball);
+
+    this.events.push({
+      type: 'gapPass',
+      ...baseEvent,
+    });
+    return true;
+  }
+
+  _maybeHandleCircleGapPass(ball, circle, state) {
+    const cfg = this._getGapPassConfig(circle);
+    if (!cfg || !(circle.insideOnly !== false) || !(effectiveCircleGapSize(circle, state.time || 0) > 0)) return false;
+    const prevDx = (ball._prevX != null ? ball._prevX : ball.x) - circle.x;
+    const prevDy = (ball._prevY != null ? ball._prevY : ball.y) - circle.y;
+    const dx = ball.x - circle.x;
+    const dy = ball.y - circle.y;
+    const prevDist = Math.hypot(prevDx, prevDy);
+    const dist = Math.hypot(dx, dy);
+    const crossedOut = prevDist <= (circle.radius || 0) && dist > (circle.radius || 0);
+    if (!crossedOut) return false;
+    const angle = Math.atan2(dy, dx);
+    const prevAngle = Math.atan2(prevDy, prevDx);
+    const sweepDebug = (details) => this._debugGap('gapSweep', {
+      ballId: ball.id,
+      colliderId: circle.id || null,
+      colliderType: 'circle',
+      x: Number((ball.x || 0).toFixed(2)),
+      y: Number((ball.y || 0).toFixed(2)),
+      prevDist: Number(prevDist.toFixed(2)),
+      dist: Number(dist.toFixed(2)),
+      angle: Number(angle.toFixed(4)),
+      prevAngle: Number(prevAngle.toFixed(4)),
+      time: state.time || 0,
+      ...details,
+    });
+    if (!ballSweepsThroughCircleGap(ball, circle, state.time || 0, prevAngle, angle, null, null, sweepDebug)) return false;
+    return this._handleGapPass(ball, circle, state, { dx, dy });
+  }
+
+  _maybeHandleArcGapPass(ball, arc, state) {
+    const cfg = this._getGapPassConfig(arc);
+    if (!cfg) return false;
+    const prevX = ball._prevX != null ? ball._prevX : ball.x;
+    const prevY = ball._prevY != null ? ball._prevY : ball.y;
+    const prevDx = prevX - arc.x;
+    const prevDy = prevY - arc.y;
+    const dx = ball.x - arc.x;
+    const dy = ball.y - arc.y;
+    const prevDist = Math.hypot(prevDx, prevDy);
+    const dist = Math.hypot(dx, dy);
+    const band = (arc.thickness || 0) * 0.5 + ball.radius + 6;
+    const crossedOut = prevDist <= (arc.radius || 0) && dist >= (arc.radius || 0) + Math.max(2, band * 0.12);
+    if (!crossedOut) return false;
+    const angle = Math.atan2(dy, dx);
+    if (angleInArc(angle, arc.startAngle, arc.endAngle, arc.rotation || 0)) return false;
+    return this._handleGapPass(ball, arc, state, { dx, dy });
+  }
+
+  _maybeHandleSpikesGapPass(ball, sp, state) {
+    const cfg = this._getGapPassConfig(sp);
+    if (!cfg || !(sp.gapSize > 0)) return false;
+    const prevDx = (ball._prevX != null ? ball._prevX : ball.x) - sp.x;
+    const prevDy = (ball._prevY != null ? ball._prevY : ball.y) - sp.y;
+    const dx = ball.x - sp.x;
+    const dy = ball.y - sp.y;
+    const prevDist = Math.hypot(prevDx, prevDy);
+    const dist = Math.hypot(dx, dy);
+    const tipR = sp.inward ? sp.radius - sp.length : sp.radius + sp.length;
+    const minR = Math.min(sp.radius, tipR);
+    const maxR = Math.max(sp.radius, tipR);
+    const margin = Math.max(8, ball.radius + 6);
+    const crossed = Math.min(prevDist, dist) <= maxR + margin && Math.max(prevDist, dist) >= minR - margin;
+    if (!crossed) return false;
+    const angle = Math.atan2(dy, dx);
+    if (!angleInGap(angle, sp.gapStart || 0, sp.gapSize || 0, sp.rotation || 0)) return false;
+    return this._handleGapPass(ball, sp, state, { dx, dy });
+  }
+
+  _maybeHandleSpiralGapPass(ball, sp, state) {
+    const cfg = this._getGapPassConfig(sp);
+    if (!cfg || !(sp.gapSize > 0)) return false;
+    const prevDx = (ball._prevX != null ? ball._prevX : ball.x) - sp.x;
+    const prevDy = (ball._prevY != null ? ball._prevY : ball.y) - sp.y;
+    const dx = ball.x - sp.x;
+    const dy = ball.y - sp.y;
+    const prevDist = Math.hypot(prevDx, prevDy);
+    const dist = Math.hypot(dx, dy);
+    const angle = Math.atan2(dy, dx);
+    const layers = Math.max(1, sp.layers | 0);
+    const step = ((sp.outerRadius || 0) - (sp.innerRadius || 0)) / layers;
+    const margin = (sp.thickness || 0) * 0.5 + ball.radius + 4;
+    for (let i = 0; i < layers; i++) {
+      const r = (sp.innerRadius || 0) + step * (i + 0.5);
+      const rot = (sp.rotation || 0) + i * (Math.PI * 2 / layers);
+      const crossed = Math.min(prevDist, dist) <= r + margin && Math.max(prevDist, dist) >= r - margin;
+      if (!crossed) continue;
+      if (!angleInGap(angle, 0, sp.gapSize || 0, rot)) continue;
+      return this._handleGapPass(ball, sp, state, { dx, dy });
+    }
+    return false;
+  }
+
+  _maybeHandleStructureGapPass(ball, structure, state) {
+    if (!ball.alive || ball._escaped) return false;
+    if (structure.type === 'circle') return this._maybeHandleCircleGapPass(ball, structure, state);
+    if (structure.type === 'arc') return this._maybeHandleArcGapPass(ball, structure, state);
+    if (structure.type === 'spiral') return this._maybeHandleSpiralGapPass(ball, structure, state);
+    if (structure.type === 'spikes') return this._maybeHandleSpikesGapPass(ball, structure, state);
+    return false;
+  }
+
+  _collideCircleGapEdges(ball, c, time, contactKey) {
+    const best = findCircleGapEdgeContact(ball, c, time, 0);
+    if (!best) return false;
+    this._debugGap('gapEdgeCandidate', {
+      ballId: ball.id,
+      colliderId: c.id || null,
+      colliderType: 'circle',
+      x: Number((ball.x || 0).toFixed(2)),
+      y: Number((ball.y || 0).toFixed(2)),
+      distToEdge: Number((best.dist || 0).toFixed(4)),
+      edgeIndex: best.edgeIndex,
+      edgeAngle: Number((best.edgeAngle || 0).toFixed(4)),
+      edgeT: Number(((best.t != null ? best.t : -1)).toFixed(4)),
+      time,
+    });
+    const prevX = ball._prevX != null ? ball._prevX : ball.x;
+    const prevY = ball._prevY != null ? ball._prevY : ball.y;
+    if (best.t != null) {
+      ball.x = lerp(prevX, ball.x, best.t);
+      ball.y = lerp(prevY, ball.y, best.t);
+    }
+    let nx = 0;
+    let ny = 0;
+    if (best.dist > 1e-6) {
+      nx = best.dx / best.dist;
+      ny = best.dy / best.dist;
+    } else {
+      const fallbackAngle = best.edgeAngle + Math.PI * 0.5;
+      nx = Math.cos(fallbackAngle);
+      ny = Math.sin(fallbackAngle);
+    }
+    const push = Math.max(0, (ball.radius || 0) - best.dist) + 0.01;
+    ball.x += nx * push;
+    ball.y += ny * push;
+    const impactSpeed = Math.abs(ball.vx * nx + ball.vy * ny);
+    this._reflect(ball, nx, ny, ball.bounce);
+    this._afterWallBounce(ball, nx, ny);
+    this._applySoftBodyImpact(ball, nx, ny, impactSpeed);
+    if (!ball._ringContact[contactKey]) {
+      this.events.push({
+        type: 'bounce',
+        source: 'circle',
+        x: ball.x,
+        y: ball.y,
+        color: ball.color,
+        ballId: ball.id,
+        colliderId: c.id,
+        colliderType: 'circle',
+        branch: best.edgeIndex === 0 ? 'gapEdgeStart' : 'gapEdgeEnd',
+        bounceSound: ball.bounceSound || '',
+        bounceSoundOn: ball.bounceSoundOn || 'all',
+      });
+      this._debugCollision('circle', {
+        ballId: ball.id,
+        colliderId: c.id,
+        colliderType: 'circle',
+        branch: best.edgeIndex === 0 ? 'gapEdgeStart' : 'gapEdgeEnd',
+        x: Number(ball.x.toFixed(2)),
+        y: Number(ball.y.toFixed(2)),
+        push: Number(push.toFixed(2)),
+        distToEdge: Number(best.dist.toFixed(2)),
+        gapSize: Number((effectiveCircleGapSize(c, time) || 0).toFixed(3)),
+        insideOnly: !!c.insideOnly,
+      });
+      ball._ringContact[contactKey] = true;
+    }
+    return true;
   }
 
   _circleRectOverlap(cx, cy, radius, rx, ry, rw, rh) {
@@ -261,19 +800,21 @@ class Physics {
   }
 
   _checkScoreBins(ball, scoreBins, state) {
-    if (!ball || !ball.alive || ball._escaped || ball.fixed || ball._frozen || ball._scored) return false;
+    if (!ball || !ball.alive || ball._escaped || ball.fixed || ball._frozen) return false;
     if (!Array.isArray(scoreBins) || scoreBins.length === 0) return false;
     if ((ball.vy || 0) < -40) return false;
     if (ball._capturedBin) return this._stepCapturedScoreBin(ball, state);
+    if (ball._scored) return false;
     if (!ball._scoreBinContact) ball._scoreBinContact = Object.create(null);
     for (let i = 0; i < scoreBins.length; i++) {
       const bin = scoreBins[i];
       const key = bin.id || `scoreBin_${i}`;
       const width = Math.max(20, bin.width || 0);
       const height = Math.max(20, bin.height || 0);
-      const left = (bin.x || 0) - width * 0.5;
+      const captureWidth = Math.max(20, Math.min(width, bin.captureWidth != null ? bin.captureWidth : width));
+      const left = (bin.x || 0) - captureWidth * 0.5;
       const top = (bin.y || 0) - height * 0.5;
-      const inside = this._circleRectOverlap(ball.x, ball.y, ball.radius || 0, left, top, width, height);
+      const inside = this._circleRectOverlap(ball.x, ball.y, ball.radius || 0, left, top, captureWidth, height);
       if (!inside) {
         ball._scoreBinContact[key] = false;
         continue;
@@ -290,6 +831,7 @@ class Physics {
         }
         ball._capturedBin = bin;
         ball._captured = true;
+        if (ball.clearTrailOnDeath && ball._trail) ball._trail.length = 0;
         ball.vx *= 0.35;
         if ((ball.vy || 0) < 60) ball.vy = 60;
       } else {
@@ -398,20 +940,65 @@ class Physics {
     this.events.length = 0;
     if (state.score == null) state.score = 0;
     const balls = state.objects.filter((o) => o.type === 'ball' && o.alive);
-    const structures = state.objects.filter((o) => o.type !== 'ball' && o.type !== 'spawner' && o.type !== 'scoreBin');
+    const structures = state.objects.filter((o) => o.type !== 'ball' && o.type !== 'spawner' && o.type !== 'scoreBin' && !o._gapRemoved);
     const scoreBins = state.objects.filter((o) => o.type === 'scoreBin');
     const spawners = state.objects.filter((o) => o.type === 'spawner');
 
     for (const ball of balls) {
       ball._prevX = ball.x;
       ball._prevY = ball.y;
+      if (Number.isFinite(ball._mazeBranchCooldown) && ball._mazeBranchCooldown > 0) {
+        ball._mazeBranchCooldown--;
+      }
+      if (Number.isFinite(ball._mazeSplitIgnoreBallFrames) && ball._mazeSplitIgnoreBallFrames > 0) {
+        ball._mazeSplitIgnoreBallFrames--;
+      }
       this._stepSoftBody(ball, dt);
     }
 
     for (const s of structures) {
-      if (typeof s.rotationSpeed === 'number' && s.rotationSpeed !== 0) {
+      s._frameXStart = s.x || 0;
+      s._frameYStart = s.y || 0;
+      s._frameBranchOriginXStart = s.mazeBranchOriginX != null ? s.mazeBranchOriginX : null;
+      s._frameBranchOriginYStart = s.mazeBranchOriginY != null ? s.mazeBranchOriginY : null;
+      s._frameRotationStart = s.rotation || 0;
+      if (
+        typeof s.mazeSpinSpeed === 'number'
+        && s.mazeSpinSpeed !== 0
+        && Number.isFinite(s.mazeOrbitCx)
+        && Number.isFinite(s.mazeOrbitCy)
+        && Number.isFinite(s.mazeBaseX)
+        && Number.isFinite(s.mazeBaseY)
+      ) {
+        s._mazeSpinAngle = (s._mazeSpinAngle || 0) + s.mazeSpinSpeed * dt;
+        const ox = s.mazeBaseX - s.mazeOrbitCx;
+        const oy = s.mazeBaseY - s.mazeOrbitCy;
+        const c = Math.cos(s._mazeSpinAngle);
+        const sn = Math.sin(s._mazeSpinAngle);
+        s.x = s.mazeOrbitCx + ox * c - oy * sn;
+        s.y = s.mazeOrbitCy + ox * sn + oy * c;
+        s.rotation = (s.mazeBaseRotation || 0) + s._mazeSpinAngle;
+        if (Number.isFinite(s.mazeBranchBaseOriginX) && Number.isFinite(s.mazeBranchBaseOriginY)) {
+          const box = s.mazeBranchBaseOriginX - s.mazeOrbitCx;
+          const boy = s.mazeBranchBaseOriginY - s.mazeOrbitCy;
+          s.mazeBranchOriginX = s.mazeOrbitCx + box * c - boy * sn;
+          s.mazeBranchOriginY = s.mazeOrbitCy + box * sn + boy * c;
+        }
+      } else if (typeof s.rotationSpeed === 'number' && s.rotationSpeed !== 0) {
         s.rotation = (s.rotation || 0) + s.rotationSpeed * dt;
+      } else if (s.type === 'flipper') {
+        const elapsed = state.elapsedTime != null ? state.elapsedTime : (state.time || 0);
+        const frequency = Math.max(0.05, s.frequency != null ? s.frequency : 1.35);
+        const phase = s.phase || 0;
+        const wave = 0.5 + 0.5 * Math.sin((elapsed * frequency + phase) * Math.PI * 2);
+        s.rotation = (s.baseRotation != null ? s.baseRotation : (s.rotation || 0)) + (s.swing || 0) * wave;
       }
+      s._frameXEnd = s.x || 0;
+      s._frameYEnd = s.y || 0;
+      s._frameBranchOriginXEnd = s.mazeBranchOriginX != null ? s.mazeBranchOriginX : null;
+      s._frameBranchOriginYEnd = s.mazeBranchOriginY != null ? s.mazeBranchOriginY : null;
+      s._frameRotationEnd = s.rotation || 0;
+      s._prevRotation = s._frameRotationStart;
     }
 
     // Fire spawners. We test the "just crossed the interval boundary" for
@@ -464,18 +1051,51 @@ class Physics {
         // the satisfying path is the source of truth.
         this._integrateParametric(ball, state.time + dt, loopDuration, dt);
       } else {
-        // Classic physics path.
-        ball.vy += this.gravity * dt;
-        if (this.friction > 0) {
-          const f = Math.max(0, 1 - this.friction * dt);
-          ball.vx *= f;
-          ball.vy *= f;
-        }
-        ball.x += ball.vx * dt;
-        ball.y += ball.vy * dt;
+        // Classic physics path. Fast balls get micro-stepped so thin rotating
+        // gap edges are checked multiple times within one frame.
+        const substeps = this._physicsSubstepCount(ball, structures, dt);
+        const subDt = dt / substeps;
+        for (let subIdx = 0; subIdx < substeps; subIdx++) {
+          const startT = subIdx / substeps;
+          const endT = (subIdx + 1) / substeps;
+          const subTime = (state.time || 0) + subDt * subIdx;
+          const subState = {
+            ...state,
+            time: subTime,
+            elapsedTime: (state.elapsedTime || 0) + subDt * subIdx,
+          };
+          this._setStructureRotationsForSubstep(structures, startT, endT);
+          ball._prevX = ball.x;
+          ball._prevY = ball.y;
+          ball.vy += this.gravity * subDt;
+          if (this.friction > 0) {
+            const f = Math.max(0, 1 - this.friction * subDt);
+            ball.vx *= f;
+            ball.vy *= f;
+          }
+          this._clampBallSpeed(ball);
+          ball.x += ball.vx * subDt;
+          ball.y += ball.vy * subDt;
 
-        for (const s of structures) {
-          this._collideBallWithStructure(ball, s, state.time);
+          for (const s of structures) {
+            this._collideBallWithStructure(ball, s, subTime, subState);
+          }
+
+          let gapHandled = false;
+          for (const s of structures) {
+            if (this._maybeHandleStructureGapPass(ball, s, subState)) {
+              gapHandled = true;
+              break;
+            }
+          }
+          if (gapHandled || !ball.alive || ball._escaped) break;
+        }
+        if (!ball.alive || ball._escaped) continue;
+        this._snapMazeBallVelocity(ball);
+        this._snapMazeBallToCorridorCenter(ball);
+        if (this._mazeExitReached(ball)) {
+          this._emitEscape(ball);
+          continue;
         }
 
         // Early escape detection: as soon as a physics ball slips outside a
@@ -493,17 +1113,25 @@ class Physics {
             const rd = Math.hypot(ball.x - s.x, ball.y - s.y);
             const margin = ball.radius + (s.thickness || 0) * 0.5 + 4;
             if (rd > (s.radius || 0) + margin) {
+              const now = state && state.elapsedTime != null ? state.elapsedTime : (state.time || 0);
               if (s.type === 'circle') {
                 const a = Math.atan2(ball.y - s.y, ball.x - s.x);
-                if (!ballFitsCircleGap(ball, s, state.time, a)) continue;
+                const prevA = Math.atan2((ball._prevY != null ? ball._prevY : ball.y) - s.y,
+                                         (ball._prevX != null ? ball._prevX : ball.x) - s.x);
+                if (!ballSweepsThroughCircleGap(ball, s, state.time, prevA, a)) continue;
+                if (this._gapPassOnCooldown(ball, s.id, now)) continue;
+                if (this._handleGapPass(ball, s, state, { dx: ball.x - s.x, dy: ball.y - s.y })) {
+                  continue;
+                }
+              } else if (s.type === 'arc') {
+                const a = Math.atan2(ball.y - s.y, ball.x - s.x);
+                if (angleInArc(a, s.startAngle, s.endAngle, s.rotation || 0)) continue;
+                if (this._gapPassOnCooldown(ball, s.id, now)) continue;
+                if (this._handleGapPass(ball, s, state, { dx: ball.x - s.x, dy: ball.y - s.y })) {
+                  continue;
+                }
               }
-              ball._escaped = true;
-              ball.alive = false;
-              if (ball.clearTrailOnDeath && ball._trail) ball._trail.length = 0;
-              this.events.push({
-                type: 'escape', x: ball.x, y: ball.y, color: ball.color,
-                escapeSound: ball.escapeSound || '',
-              });
+              this._emitEscape(ball);
               continue;
             }
           }
@@ -518,12 +1146,7 @@ class Physics {
           ball.alive = false;
           // Don't double-emit escape if the ring check already caught it.
           if (!ball._escaped) {
-            ball._escaped = true;
-            if (ball.clearTrailOnDeath && ball._trail) ball._trail.length = 0;
-            this.events.push({
-              type: 'escape', x: ball.x, y: ball.y, color: ball.color,
-              escapeSound: ball.escapeSound || '',
-            });
+            this._emitEscape(ball);
           }
           continue;
         }
@@ -556,7 +1179,11 @@ class Physics {
 
     // Ball-ball collisions. Frozen balls are treated as infinite-mass
     // obstacles: moving balls reflect off them but they never move.
-    this._resolveBallBall(balls);
+    this._resolveBallBall(balls, state);
+    for (const ball of balls) {
+      this._snapMazeBallVelocity(ball);
+      this._snapMazeBallToCorridorCenter(ball);
+    }
 
     // Any ball that died this tick and has `clearTrailOnDeath` set gets its
     // trail wiped now so it doesn't linger as a ghost snake on the canvas.
@@ -576,7 +1203,7 @@ class Physics {
 
   // Deterministic O(n^2) pair pass. Fine for scenes with <200 balls and
   // simple enough that floating-point behaviour is reproducible across runs.
-  _resolveBallBall(balls) {
+  _resolveBallBall(balls, state) {
     // Balls that have already been captured by a score bin no longer need
     // expensive ball-ball collision resolution. Letting a whole bucket full of
     // captured balls continue colliding creates an O(n^2) hotspot and can
@@ -594,6 +1221,15 @@ class Physics {
         if (!B._ballContact) B._ballContact = Object.create(null);
         const contactKeyA = B.id || `ball_${j}`;
         const contactKeyB = A.id || `ball_${i}`;
+        const sameFreshSplit = A._mazeSplitGroup
+          && B._mazeSplitGroup
+          && A._mazeSplitGroup === B._mazeSplitGroup
+          && ((A._mazeSplitIgnoreBallFrames || 0) > 0 || (B._mazeSplitIgnoreBallFrames || 0) > 0);
+        if (sameFreshSplit) {
+          A._ballContact[contactKeyA] = false;
+          B._ballContact[contactKeyB] = false;
+          continue;
+        }
         let dx = B.x - A.x, dy = B.y - A.y;
         let d = Math.hypot(dx, dy);
         const r = (A.radius || 0) + (B.radius || 0);
@@ -625,6 +1261,10 @@ class Physics {
         }
         const overlap = r - d;
         const sepEps = Math.max(0.05, Math.min(1.2, overlap * 0.08));
+        const incomingAVx = A.vx || 0;
+        const incomingAVy = A.vy || 0;
+        const incomingBVx = B.vx || 0;
+        const incomingBVy = B.vy || 0;
         let didBounce = false;
         if (aFrozen) {
           B.x += nx * (overlap + sepEps); B.y += ny * (overlap + sepEps);
@@ -638,6 +1278,7 @@ class Physics {
             this._applySoftBodyImpact(B, nx, ny, Math.abs(vn));
             didBounce = true;
           }
+          if (didBounce) this._maybeMazeBranchOnFixedBounce(state, B, A, incomingBVx, incomingBVy);
         } else if (bFrozen) {
           A.x -= nx * (overlap + sepEps); A.y -= ny * (overlap + sepEps);
           const vn = A.vx * nx + A.vy * ny;
@@ -650,6 +1291,7 @@ class Physics {
             this._applySoftBodyImpact(A, -nx, -ny, Math.abs(vn));
             didBounce = true;
           }
+          if (didBounce) this._maybeMazeBranchOnFixedBounce(state, A, B, incomingAVx, incomingAVy);
         } else {
           // Equal-mass elastic exchange of the normal velocity component.
           A.x -= nx * (overlap + sepEps) * 0.5; A.y -= ny * (overlap + sepEps) * 0.5;
@@ -678,15 +1320,18 @@ class Physics {
           // Ball-ball bounce borrows the "moving" ball's sound: if A is
           // frozen/fixed, the sound-emitting contact came from B.
           const voiceBall = aFrozen ? B : A;
+          const contactX = (A.x + B.x) * 0.5;
+          const contactY = (A.y + B.y) * 0.5;
           this.events.push({
             type: 'bounce',
             source: (A.fixed || B.fixed) ? 'fixedBall' : 'ballBall',
-            x: (A.x + B.x) * 0.5,
-            y: (A.y + B.y) * 0.5,
+            x: contactX,
+            y: contactY,
             color: aFrozen ? B.color : A.color,
             ballId: A.id,
             otherBallId: B.id,
             bounceSound: voiceBall.bounceSound || '',
+            bounceSoundOn: voiceBall.bounceSoundOn || 'all',
           });
           this._debugCollision((A.fixed || B.fixed) ? 'fixedBall' : 'ballBall', {
             ballId: A.id,
@@ -699,6 +1344,52 @@ class Physics {
             bFrozen,
             didBounce,
           });
+          if (A.fixed && Number.isFinite(A.points) && !B.fixed) {
+            this._scorePinballContactOnce(B, A, state, contactX, contactY, A.id || contactKeyA);
+          }
+          if (B.fixed && Number.isFinite(B.points) && !A.fixed) {
+            this._scorePinballContactOnce(A, B, state, contactX, contactY, B.id || contactKeyB);
+          }
+          if (aFrozen) {
+            this._maybeCreateCollisionHole(B, A, 'fixedBall', state, {
+              anchorX: contactX,
+              anchorY: contactY,
+              incomingVx: incomingBVx,
+              incomingVy: incomingBVy,
+            });
+            this._maybeCreateCollisionHole(A, B, 'ball', state, {
+              anchorX: contactX,
+              anchorY: contactY,
+              incomingVx: incomingBVx,
+              incomingVy: incomingBVy,
+            });
+          } else if (bFrozen) {
+            this._maybeCreateCollisionHole(A, B, 'fixedBall', state, {
+              anchorX: contactX,
+              anchorY: contactY,
+              incomingVx: incomingAVx,
+              incomingVy: incomingAVy,
+            });
+            this._maybeCreateCollisionHole(B, A, 'ball', state, {
+              anchorX: contactX,
+              anchorY: contactY,
+              incomingVx: incomingAVx,
+              incomingVy: incomingAVy,
+            });
+          } else {
+            this._maybeCreateCollisionHole(A, B, 'ball', state, {
+              anchorX: contactX,
+              anchorY: contactY,
+              incomingVx: incomingAVx,
+              incomingVy: incomingAVy,
+            });
+            this._maybeCreateCollisionHole(B, A, 'ball', state, {
+              anchorX: contactX,
+              anchorY: contactY,
+              incomingVx: incomingBVx,
+              incomingVy: incomingBVy,
+            });
+          }
         }
         if (didBounce) {
           A._ballContact[contactKeyA] = true;
@@ -744,6 +1435,36 @@ class Physics {
     // spawner's nextSpawnTime permanently unreachable after the first wrap.
     const elapsedTime = state.elapsedTime != null ? state.elapsedTime : state.time;
     const nextSpawnTime = sp._lastSpawn + interval;
+    const isActiveSpawnedBall = (ball) => ball
+      && ball.type === 'ball'
+      && ball.alive
+      && !ball._escaped
+      && !ball._captured
+      && !ball._capturedBin
+      && !ball.fixed
+      && ball._fromSpawner === sp.id;
+    sp._spawnedIds = sp._spawnedIds.filter((id) => state.objects.some((o) => o.id === id));
+    const activeSpawnedCount = state.objects.filter(isActiveSpawnedBall).length;
+    const maxActiveBalls = Math.max(0, sp.maxActiveBalls | 0);
+    const maxTotalBalls = Math.max(0, sp.maxTotalBalls | 0);
+    if (maxTotalBalls > 0 && (sp._spawnCount || 0) >= maxTotalBalls) {
+      if (activeSpawnedCount === 0 && !sp._finished) {
+        sp._finished = true;
+        state._finished = true;
+        const tail = Math.max(0, sp.finishTailSeconds != null ? sp.finishTailSeconds : 1.4);
+        this.events.push({
+          type: 'finish',
+          source: 'spawner',
+          spawnerId: sp.id || null,
+          at: elapsedTime,
+          tail,
+        });
+      }
+      return;
+    }
+    if (maxActiveBalls > 0 && activeSpawnedCount >= maxActiveBalls) {
+      return;
+    }
     if (elapsedTime + dt < nextSpawnTime) {
       this._debugSpawner('wait', {
         spawnerId: sp.id,
@@ -772,25 +1493,39 @@ class Physics {
     const spawnX = (sp.x || 0) + hash(1) * jitterX;
     const spawnVx = (sp.ballVx || 0) + hash(2) * jitterVx;
     const spawnVy = (sp.ballVy || 0) + hash(3) * jitterVy;
+    let finalVx = spawnVx;
+    let finalVy = spawnVy;
+    if (sp.ballRandomInitDir) {
+      const speed = Math.hypot(spawnVx || 0, spawnVy || 0);
+      if (speed > 1e-6) {
+        const angle = hash(4) * Math.PI;
+        finalVx = Math.cos(angle) * speed;
+        finalVy = Math.sin(angle) * speed;
+      }
+    }
     const ball = {
       id: `${sp.id}_b${sp._spawnCount}`,
       type: 'ball',
       x: spawnX, y: sp.y,
       spawnX,
       spawnY: sp.y,
-      vx: spawnVx,
-      vy: spawnVy,
+      vx: finalVx,
+      vy: finalVy,
       radius: sp.ballRadius || 18,
       color,
       trail: !!sp.ballTrail,
       trailLength: sp.ballTrailLength || 40,
       clearTrailOnDeath: sp.ballClearTrailOnDeath !== false,
+      randomInitDir: !!sp.ballRandomInitDir,
       lifetime: sp.ballLifetime || 0,
       freezeOnTimeout: !!sp.ballFreezeOnTimeout,
       fixed: !!sp.ballFixed,
+      ballBehaviorPreset: sp.ballBehaviorPreset || 'custom',
+      maxSpeed: sp.ballMaxSpeed || 0,
       bounce: sp.ballBounce != null ? sp.ballBounce : 1.0,
       wallCurve: sp.ballWallCurve != null ? sp.ballWallCurve : 0,
       wallDrift: sp.ballWallDrift != null ? sp.ballWallDrift : 0,
+      wallBounceAngleRange: sp.ballWallBounceAngleRange != null ? sp.ballWallBounceAngleRange : 0,
       collisionSpread: sp.ballCollisionSpread != null ? sp.ballCollisionSpread : 0.35,
       softBody: !!sp.ballSoftBody,
       elasticity: sp.ballElasticity != null ? sp.ballElasticity : 0.35,
@@ -802,9 +1537,20 @@ class Physics {
       recolorOnFreeze: !!sp.ballRecolorOnFreeze,
       deathBurstOnFreeze: !!sp.ballDeathBurstOnFreeze,
       bounceSound: sp.ballBounceSound || '',
+      bounceSoundOn: sp.ballBounceSoundOn || 'all',
       escapeSound: sp.ballEscapeSound || '',
       destroySound: sp.ballDestroySound || '',
       deathSound: sp.ballDeathSound || '',
+      collisionHoleEnabled: !!sp.ballCollisionHoleEnabled,
+      collisionHoleSize: sp.ballCollisionHoleSize != null ? sp.ballCollisionHoleSize : 0.42,
+      collisionHoleTarget: sp.ballCollisionHoleTarget || 'auto',
+      collisionHolePlacement: sp.ballCollisionHolePlacement || 'impact',
+      collisionHoleOnCircle: !!sp.ballCollisionHoleOnCircle,
+      collisionHoleOnArc: !!sp.ballCollisionHoleOnArc,
+      collisionHoleOnSpikes: !!sp.ballCollisionHoleOnSpikes,
+      collisionHoleOnSpinner: !!sp.ballCollisionHoleOnSpinner,
+      collisionHoleOnBall: !!sp.ballCollisionHoleOnBall,
+      collisionHoleOnFixedBall: !!sp.ballCollisionHoleOnFixedBall,
       destroyOnSpike: sp.ballDestroyOnSpike !== false,
       freezeOnSpike: !!sp.ballFreezeOnSpike,
       alive: true, age: 0,
@@ -886,14 +1632,266 @@ class Physics {
     }
   }
 
-  _collideBallWithStructure(ball, s, time = 0) {
+  _collideBallWithStructure(ball, s, time = 0, state = null) {
     switch (s.type) {
-      case 'circle': return this._collideCircleRing(ball, s, time);
-      case 'arc': return this._collideArc(ball, s);
-      case 'spiral': return this._collideSpiral(ball, s);
-      case 'spikes': return this._collideSpikes(ball, s);
+      case 'circle': return this._collideCircleRing(ball, s, time, state);
+      case 'arc': return this._collideArc(ball, s, state);
+      case 'spiral': return this._collideSpiral(ball, s, state);
+      case 'spikes': return this._collideSpikes(ball, s, state);
+      case 'spinner': return this._collideSpinner(ball, s, state);
+      case 'booster': return this._collideBooster(ball, s, state);
+      case 'flipper': return this._collideFlipper(ball, s, state);
     }
     return false;
+  }
+
+  _awardPinballScore(ball, target, state, x, y) {
+    if (!state || !target || !Number.isFinite(target.points)) return;
+    const points = target.points | 0;
+    if (points === 0) return;
+    state.score = (state.score || 0) + points;
+    const label = target.label != null && String(target.label).trim()
+      ? String(target.label)
+      : `${points >= 0 ? '+' : ''}${points}`;
+    this.events.push({
+      type: 'score',
+      source: target.type || 'pinball',
+      x,
+      y,
+      color: target.accentColor || target.color || ball.color,
+      textColor: '#ffffff',
+      ballId: ball.id,
+      bucketId: target.id || null,
+      points,
+      label,
+    });
+  }
+
+  _scorePinballContactOnce(ball, target, state, x, y, contactKey) {
+    if (!ball || !target || !state) return;
+    if (!ball._pinballScoreContact) ball._pinballScoreContact = Object.create(null);
+    const now = state.elapsedTime != null ? state.elapsedTime : (state.time || 0);
+    const key = contactKey || target.id || target.type || 'pinball';
+    const cooldown = Math.max(0, target.cooldown != null ? target.cooldown : 0.1);
+    const last = ball._pinballScoreContact[key];
+    if (last != null && now - last < cooldown) return;
+    ball._pinballScoreContact[key] = now;
+    this._awardPinballScore(ball, target, state, x, y);
+  }
+
+  _collideBooster(ball, booster, state = null) {
+    const radius = Math.max(4, booster.radius || 0);
+    const dx = ball.x - (booster.x || 0);
+    const dy = ball.y - (booster.y || 0);
+    let dist = Math.hypot(dx, dy);
+    const limit = (ball.radius || 0) + radius;
+    if (dist > limit) return false;
+    let nx = dx;
+    let ny = dy;
+    if (dist <= 1e-6) {
+      nx = 0;
+      ny = -1;
+      dist = 1e-6;
+    } else {
+      nx /= dist;
+      ny /= dist;
+    }
+    const push = limit - dist;
+    ball.x += nx * push;
+    ball.y += ny * push;
+    const incomingVx = ball.vx || 0;
+    const incomingVy = ball.vy || 0;
+    const impactSpeed = Math.abs(incomingVx * nx + incomingVy * ny);
+    this._reflect(ball, nx, ny, Math.max(ball.bounce != null ? ball.bounce : 1, 1.08));
+    const strength = Math.max(0, booster.strength != null ? booster.strength : 680);
+    ball.vx += nx * strength;
+    ball.vy += ny * strength;
+    this._clampBallSpeed(ball);
+    this._applySoftBodyImpact(ball, nx, ny, impactSpeed + strength);
+    this.events.push({
+      type: 'bounce',
+      source: 'booster',
+      x: ball.x,
+      y: ball.y,
+      color: booster.accentColor || booster.color || ball.color,
+      ballId: ball.id,
+      colliderId: booster.id || null,
+      colliderType: 'booster',
+      bounceSound: ball.bounceSound || '',
+      bounceSoundOn: ball.bounceSoundOn || 'all',
+    });
+    this._scorePinballContactOnce(ball, booster, state, ball.x, ball.y, booster.id || 'booster');
+    return true;
+  }
+
+  _collideFlipper(ball, flipper, state = null) {
+    const length = Math.max(20, flipper.length || 0);
+    const halfThickness = Math.max(2, flipper.thickness || 0) * 0.5;
+    const angle = flipper.rotation || 0;
+    const ax = flipper.x || 0;
+    const ay = flipper.y || 0;
+    const bx = ax + Math.cos(angle) * length;
+    const by = ay + Math.sin(angle) * length;
+    const closest = closestPointOnSegment(ball.x, ball.y, ax, ay, bx, by);
+    let nx = ball.x - closest.x;
+    let ny = ball.y - closest.y;
+    let dist = Math.hypot(nx, ny);
+    const limit = (ball.radius || 0) + halfThickness;
+    if (dist > limit) return false;
+    if (dist <= 1e-6) {
+      nx = -Math.sin(angle);
+      ny = Math.cos(angle);
+      dist = 1e-6;
+    } else {
+      nx /= dist;
+      ny /= dist;
+    }
+    const push = limit - dist;
+    ball.x += nx * push;
+    ball.y += ny * push;
+    const incomingVx = ball.vx || 0;
+    const incomingVy = ball.vy || 0;
+    const impactSpeed = Math.abs(incomingVx * nx + incomingVy * ny);
+    this._reflect(ball, nx, ny, Math.max(ball.bounce != null ? ball.bounce : 1, 1.05));
+    const rotDelta = shortestAngleDelta(flipper._prevRotation || angle, angle);
+    const swingBoost = Math.abs(rotDelta) * length * 9;
+    const strength = Math.max(0, flipper.strength != null ? flipper.strength : 720);
+    const contactT = closest.t != null ? closest.t : 1;
+    const lever = 0.45 + contactT * 0.75;
+    ball.vx += nx * (strength * lever + swingBoost);
+    ball.vy += ny * (strength * lever + swingBoost);
+    this._clampBallSpeed(ball);
+    this._afterWallBounce(ball, nx, ny);
+    this._applySoftBodyImpact(ball, nx, ny, impactSpeed + strength);
+    this.events.push({
+      type: 'bounce',
+      source: 'flipper',
+      x: ball.x,
+      y: ball.y,
+      color: flipper.color || ball.color,
+      ballId: ball.id,
+      colliderId: flipper.id || null,
+      colliderType: 'flipper',
+      bounceSound: ball.bounceSound || '',
+      bounceSoundOn: ball.bounceSoundOn || 'all',
+    });
+    this._scorePinballContactOnce(ball, flipper, state, ball.x, ball.y, flipper.id || 'flipper');
+    return true;
+  }
+
+  _collideSpinner(ball, sp, state = null) {
+    const armLength = Math.max(10, sp.armLength || 0);
+    const half = armLength * 0.5;
+    const halfThickness = Math.max(2, sp.thickness || 0) * 0.5;
+    const armCount = Math.max(1, sp.armCount | 0);
+    const releaseMargin = Math.max(2, ball.radius * 0.18);
+    if (!ball._spinnerContact) ball._spinnerContact = Object.create(null);
+    let hit = false;
+    for (let i = 0; i < armCount; i++) {
+      const a = (sp.rotation || 0) + i * (Math.PI / armCount);
+      const dx = Math.cos(a) * half;
+      const dy = Math.sin(a) * half;
+      const ax = sp.x - dx;
+      const ay = sp.y - dy;
+      const bx = sp.x + dx;
+      const by = sp.y + dy;
+      const key = `${sp.id || '__spinner'}:${i}`;
+      const closest = closestPointOnSegment(ball.x, ball.y, ax, ay, bx, by);
+      let nx = ball.x - closest.x;
+      let ny = ball.y - closest.y;
+      let dist = Math.hypot(nx, ny);
+      const limit = ball.radius + halfThickness;
+      if (dist > limit + releaseMargin) {
+        ball._spinnerContact[key] = false;
+        continue;
+      }
+      if (dist >= limit) continue;
+      if (dist <= 1e-6) {
+        nx = -Math.sin(a);
+        ny = Math.cos(a);
+        dist = 1e-6;
+      } else {
+        nx /= dist;
+        ny /= dist;
+      }
+      const push = limit - dist;
+      ball.x += nx * push;
+      ball.y += ny * push;
+      const incomingVx = ball.vx || 0;
+      const incomingVy = ball.vy || 0;
+      if (sp.mazeBranchTrigger) {
+        if (!ball._mazeVisitedTriggers) ball._mazeVisitedTriggers = Object.create(null);
+        if (sp.id && ball._mazeVisitedTriggers[sp.id]) {
+          ball._spinnerContact[key] = true;
+          hit = true;
+          continue;
+        }
+        if (this._maybeMazeBranchOnWallBounce(
+          state,
+          ball,
+          incomingVx,
+          incomingVy,
+          halfThickness,
+          sp,
+        )) {
+          if (sp.id) ball._mazeVisitedTriggers[sp.id] = true;
+          ball._spinnerContact[key] = true;
+          hit = true;
+        }
+        // Junction triggers are logical markers only; balls should never
+        // bounce off them if they merely pass through after a recent split.
+        continue;
+      }
+      if (sp.mazeWall && this._maybeMazeBranchOnWallBounce(
+        state,
+        ball,
+        incomingVx,
+        incomingVy,
+        halfThickness,
+        sp,
+      )) {
+        ball._spinnerContact[key] = true;
+        hit = true;
+        continue;
+      }
+      const impactSpeed = Math.abs(ball.vx * nx + ball.vy * ny);
+      this._reflect(ball, nx, ny, ball.bounce);
+      this._afterWallBounce(ball, nx, ny);
+      this._applySoftBodyImpact(ball, nx, ny, impactSpeed);
+      if (!ball._spinnerContact[key]) {
+        this.events.push({
+          type: 'bounce',
+          source: 'spinner',
+          x: ball.x,
+          y: ball.y,
+          color: ball.color,
+          ballId: ball.id,
+          colliderId: sp.id || null,
+          colliderType: 'spinner',
+          bounceSound: ball.bounceSound || '',
+          bounceSoundOn: ball.bounceSoundOn || 'all',
+        });
+        this._debugCollision('spinner', {
+          ballId: ball.id,
+          colliderId: sp.id || null,
+          colliderType: 'spinner',
+          x: Number(ball.x.toFixed(2)),
+          y: Number(ball.y.toFixed(2)),
+          armIndex: i,
+          push: Number(push.toFixed(2)),
+          angle: Number(a.toFixed(3)),
+        });
+        this._maybeCreateCollisionHole(ball, sp, 'spinner', state, {
+          anchorX: closest.x,
+          anchorY: closest.y,
+          incomingVx,
+          incomingVy,
+        });
+        ball._spinnerContact[key] = true;
+      }
+      hit = true;
+    }
+    return hit;
   }
 
   _reflect(ball, nx, ny, restitution) {
@@ -910,6 +1908,206 @@ class Physics {
     const vy = ball.vy;
     ball.vx = vx * c - vy * s;
     ball.vy = vx * s + vy * c;
+  }
+
+  _setMazeBallDirection(ball, dir, speed = null) {
+    if (!ball || !dir) return;
+    const x = Math.sign(dir.x || 0);
+    const y = Math.sign(dir.y || 0);
+    const nextSpeed = Math.max(
+      1e-6,
+      speed != null
+        ? Math.abs(speed)
+        : (ball.mazeBranchSpeed != null ? Math.abs(ball.mazeBranchSpeed) : Math.hypot(ball.vx || 0, ball.vy || 0)),
+    );
+    if (Math.abs(x) >= Math.abs(y)) {
+      ball._mazeAxis = 'h';
+      ball._mazeDirX = x || 1;
+      ball._mazeDirY = 0;
+      ball.vx = (x || 1) * nextSpeed;
+      ball.vy = 0;
+    } else {
+      ball._mazeAxis = 'v';
+      ball._mazeDirX = 0;
+      ball._mazeDirY = y || 1;
+      ball.vx = 0;
+      ball.vy = (y || 1) * nextSpeed;
+    }
+  }
+
+  _snapMazeBallVelocity(ball) {
+    if (!ball || !ball.mazeBranchOnFixedBounce || ball._frozen || ball.fixed) return;
+    const vx = ball.vx || 0;
+    const vy = ball.vy || 0;
+    const ax = Math.abs(vx);
+    const ay = Math.abs(vy);
+    const speed = Math.max(
+      1e-6,
+      ball.mazeBranchSpeed != null ? Math.abs(ball.mazeBranchSpeed) : Math.hypot(vx, vy),
+    );
+    if (ax <= 1e-6 && ay <= 1e-6) {
+      ball.vx = 0;
+      ball.vy = 0;
+      return;
+    }
+    if (ball._mazeAxis === 'h') {
+      this._setMazeBallDirection(ball, { x: ball._mazeDirX || Math.sign(vx || 1) || 1, y: 0 }, speed);
+      return;
+    }
+    if (ball._mazeAxis === 'v') {
+      this._setMazeBallDirection(ball, { x: 0, y: ball._mazeDirY || Math.sign(vy || 1) || 1 }, speed);
+      return;
+    }
+    this._setMazeBallDirection(ball, ax >= ay
+      ? { x: Math.sign(vx) || 1, y: 0 }
+      : { x: 0, y: Math.sign(vy) || 1 }, speed);
+  }
+
+  _snapMazeBallToCorridorCenter(ball) {
+    if (!ball || !ball.mazeBranchOnFixedBounce || ball._frozen || ball.fixed) return;
+    const cell = Number(ball.mazeGridCell);
+    if (!(cell > 0)) return;
+    const originX = Number(ball.mazeGridOriginX);
+    const originY = Number(ball.mazeGridOriginY);
+    if (!Number.isFinite(originX) || !Number.isFinite(originY)) return;
+    const axis = ball._mazeAxis || (Math.abs(ball.vx || 0) >= Math.abs(ball.vy || 0) ? 'h' : 'v');
+    if (axis === 'h') {
+      const row = Math.round((ball.y - originY) / cell);
+      ball.y = originY + row * cell;
+    } else {
+      const col = Math.round((ball.x - originX) / cell);
+      ball.x = originX + col * cell;
+    }
+  }
+
+  _emitEscape(ball) {
+    if (!ball || ball._escaped) return;
+    ball._escaped = true;
+    ball.alive = false;
+    if (ball.clearTrailOnDeath && ball._trail) ball._trail.length = 0;
+    this.events.push({
+      type: 'escape',
+      x: ball.x,
+      y: ball.y,
+      color: ball.color,
+      escapeSound: ball.escapeSound || '',
+    });
+  }
+
+  _mazeExitReached(ball) {
+    if (!ball || !ball.mazeBranchOnFixedBounce) return false;
+    const side = String(ball.mazeExitSide || '');
+    const exitX = Number(ball.mazeExitX);
+    const exitY = Number(ball.mazeExitY);
+    const cell = Number(ball.mazeGridCell);
+    if (!side || !Number.isFinite(exitX) || !Number.isFinite(exitY) || !(cell > 0)) return false;
+    const threshold = Number.isFinite(ball.mazeExitThreshold) ? Number(ball.mazeExitThreshold) : Math.max(10, cell * 0.24);
+    const span = Number.isFinite(ball.mazeExitSpan) ? Number(ball.mazeExitSpan) : Math.max(8, cell * 0.34);
+    const planeOffset = cell * 0.5;
+    switch (side) {
+      case 'n':
+        return Math.abs(ball.x - exitX) <= span && ball.y <= exitY - planeOffset - threshold;
+      case 's':
+        return Math.abs(ball.x - exitX) <= span && ball.y >= exitY + planeOffset + threshold;
+      case 'w':
+        return Math.abs(ball.y - exitY) <= span && ball.x <= exitX - planeOffset - threshold;
+      case 'e':
+        return Math.abs(ball.y - exitY) <= span && ball.x >= exitX + planeOffset + threshold;
+      default:
+        return false;
+    }
+  }
+
+  _scatterWallBounce(ball, nx, ny) {
+    const rangeDeg = Math.max(0, Math.min(120, ball.wallBounceAngleRange || 0));
+    if (rangeDeg <= 0) return;
+    const speed = Math.hypot(ball.vx || 0, ball.vy || 0);
+    if (speed <= 1e-6) return;
+    const tx = -ny;
+    const ty = nx;
+    const vn = ball.vx * nx + ball.vy * ny;
+    const vt = ball.vx * tx + ball.vy * ty;
+    if (vn <= 1e-6) return;
+    ball._wallScatterCount = (ball._wallScatterCount || 0) + 1;
+    const n = ball._wallScatterCount;
+    const phase = n * 2.414 + (ball.spawnX != null ? ball.spawnX : ball.x) * 0.013 + (ball.spawnY != null ? ball.spawnY : ball.y) * 0.009;
+    const jitter = Math.sin(phase) * (rangeDeg * Math.PI / 180) * 0.5;
+    const baseAngle = Math.atan2(vt, vn);
+    const maxAngle = Math.min(Math.PI * 0.47, Math.PI * 0.5 - 0.04);
+    const targetAngle = Math.max(-maxAngle, Math.min(maxAngle, baseAngle + jitter));
+    const nextVn = Math.cos(targetAngle) * speed;
+    const nextVt = Math.sin(targetAngle) * speed;
+    ball.vx = nx * nextVn + tx * nextVt;
+    ball.vy = ny * nextVn + ty * nextVt;
+  }
+
+  _afterWallBounce(ball, nx, ny) {
+    this._curveBounce(ball, nx, ny);
+    this._scatterWallBounce(ball, nx, ny);
+    this._clampBallSpeed(ball);
+  }
+
+  _clampBallSpeed(ball) {
+    const maxSpeed = Math.max(0, ball && ball.maxSpeed || 0);
+    if (!(maxSpeed > 0)) return;
+    const speed = Math.hypot(ball.vx || 0, ball.vy || 0);
+    if (!(speed > maxSpeed) || speed <= 1e-6) return;
+    const scale = maxSpeed / speed;
+    ball.vx *= scale;
+    ball.vy *= scale;
+  }
+
+  _physicsSubstepCount(ball, structures, dt) {
+    const speed = Math.hypot(ball.vx || 0, ball.vy || 0);
+    let edgeTravel = 0;
+    for (const s of structures) {
+      if (s.type === 'circle') {
+        const radius = Math.max(0, (s.radius || 0) + (s.thickness || 0) * 0.5);
+        edgeTravel = Math.max(edgeTravel, Math.abs(s.rotationSpeed || 0) * radius * dt);
+        continue;
+      }
+      if (
+        s.type === 'spinner'
+        && typeof s.mazeSpinSpeed === 'number'
+        && Number.isFinite(s.mazeOrbitCx)
+        && Number.isFinite(s.mazeOrbitCy)
+        && Number.isFinite(s.mazeBaseX)
+        && Number.isFinite(s.mazeBaseY)
+      ) {
+        const orbitRadius = Math.hypot(s.mazeBaseX - s.mazeOrbitCx, s.mazeBaseY - s.mazeOrbitCy);
+        const extent = orbitRadius + Math.max(0, (s.armLength || 0) * 0.5) + Math.max(0, (s.thickness || 0) * 0.5);
+        edgeTravel = Math.max(edgeTravel, Math.abs(s.mazeSpinSpeed || 0) * extent * dt);
+      }
+    }
+    const travel = speed * dt + Math.abs(this.gravity || 0) * dt * dt + edgeTravel;
+    const target = Math.max(2, (ball.radius || 0) * 0.12);
+    return Math.max(1, Math.min(48, Math.ceil(travel / target)));
+  }
+
+  _setStructureRotationsForSubstep(structures, startT, endT) {
+    for (const s of structures) {
+      const frameXStart = s._frameXStart != null ? s._frameXStart : (s.x || 0);
+      const frameXEnd = s._frameXEnd != null ? s._frameXEnd : (s.x || 0);
+      const frameYStart = s._frameYStart != null ? s._frameYStart : (s.y || 0);
+      const frameYEnd = s._frameYEnd != null ? s._frameYEnd : (s.y || 0);
+      const branchOriginXStart = s._frameBranchOriginXStart != null ? s._frameBranchOriginXStart : s.mazeBranchOriginX;
+      const branchOriginXEnd = s._frameBranchOriginXEnd != null ? s._frameBranchOriginXEnd : s.mazeBranchOriginX;
+      const branchOriginYStart = s._frameBranchOriginYStart != null ? s._frameBranchOriginYStart : s.mazeBranchOriginY;
+      const branchOriginYEnd = s._frameBranchOriginYEnd != null ? s._frameBranchOriginYEnd : s.mazeBranchOriginY;
+      const frameStart = s._frameRotationStart != null ? s._frameRotationStart : (s.rotation || 0);
+      const frameEnd = s._frameRotationEnd != null ? s._frameRotationEnd : (s.rotation || 0);
+      const delta = shortestAngleDelta(frameStart, frameEnd);
+      s.x = frameXStart + (frameXEnd - frameXStart) * endT;
+      s.y = frameYStart + (frameYEnd - frameYStart) * endT;
+      if (branchOriginXStart != null && branchOriginXEnd != null) {
+        s.mazeBranchOriginX = branchOriginXStart + (branchOriginXEnd - branchOriginXStart) * endT;
+      }
+      if (branchOriginYStart != null && branchOriginYEnd != null) {
+        s.mazeBranchOriginY = branchOriginYStart + (branchOriginYEnd - branchOriginYStart) * endT;
+      }
+      s._prevRotation = frameStart + delta * startT;
+      s.rotation = frameStart + delta * endT;
+    }
   }
 
   _curveBounce(ball, nx, ny) {
@@ -969,6 +2167,7 @@ class Physics {
     normMag = normMag / outSpeed * speed;
     ball.vx = tx * tanMag + nx * normMag;
     ball.vy = ty * tanMag + ny * normMag;
+    this._clampBallSpeed(ball);
     ball._wallSlideLife = Math.max(0, slideLife - 1);
   }
 
@@ -983,6 +2182,7 @@ class Physics {
     const dir = Math.abs(vt) > 1e-6 ? Math.sign(vt) : fallbackDir;
     // Up to ~20 degrees of extra fan-out after ball-ball hits.
     this._rotateVelocity(ball, dir * strength * 0.35);
+    this._clampBallSpeed(ball);
   }
 
   _cycleBallCollisionColor(ball) {
@@ -995,7 +2195,291 @@ class Physics {
     ball.color = COLLISION_COLOR_PALETTE[ball._collisionColorIndex];
   }
 
-  _collideCircleRing(ball, c, time = 0) {
+  _mazeBranchSpawnOffset(parent, markerRadius = 0) {
+    return Math.max(
+      (parent.radius || 0) * 2.4,
+      (parent.radius || 0) + markerRadius + 10,
+    );
+  }
+
+  _resetMazeBranchVisualState(ball) {
+    if (!ball) return;
+    ball._trail = [];
+    ball._softStretch = 0;
+    ball._softSquash = 0;
+    ball._softFlow = 0;
+    ball._softPress = 0;
+    ball._softSkew = 0;
+    ball._softWobbleAmp = 0;
+    ball._softWobblePhase = 0;
+    ball._softAxisX = Math.abs(ball.vx || 0) >= Math.abs(ball.vy || 0) ? Math.sign(ball.vx || 1) : 0;
+    ball._softAxisY = Math.abs(ball.vy || 0) > Math.abs(ball.vx || 0) ? Math.sign(ball.vy || 1) : 0;
+  }
+
+  _spawnMazeBranchChildren(state, parent, directions, speed, options = {}) {
+    state._mazeBranchSeq = (state._mazeBranchSeq || 0) + 1;
+    const seq = state._mazeBranchSeq;
+    const markerRadius = Math.max(0, options.markerRadius || 0);
+    const spawnOriginX = options.spawnOriginX != null ? options.spawnOriginX : parent.x;
+    const spawnOriginY = options.spawnOriginY != null ? options.spawnOriginY : parent.y;
+    const offset = options.startCentered ? 0 : this._mazeBranchSpawnOffset(parent, markerRadius);
+    const graceFrames = Math.max(0, parent.mazeBranchGraceFrames != null ? (parent.mazeBranchGraceFrames | 0) : 6);
+    const splitIgnoreFrames = options.startCentered ? 2 : 0;
+    const nextGeneration = (parent.mazeBranchGeneration | 0) + 1;
+    const makeChild = (dir, idx) => ({
+      id: `maze_branch_${seq}_${idx}`,
+      type: 'ball',
+      x: spawnOriginX + dir.x * offset,
+      y: spawnOriginY + dir.y * offset,
+      spawnX: spawnOriginX + dir.x * offset,
+      spawnY: spawnOriginY + dir.y * offset,
+      vx: dir.x * speed,
+      vy: dir.y * speed,
+      radius: parent.radius,
+      color: parent.color,
+      trail: parent.trail,
+      trailLength: parent.trailLength,
+      clearTrailOnDeath: parent.clearTrailOnDeath,
+      lifetime: parent.lifetime,
+      freezeOnTimeout: parent.freezeOnTimeout,
+      fixed: false,
+      ballBehaviorPreset: parent.ballBehaviorPreset || 'custom',
+      maxSpeed: parent.maxSpeed || 0,
+      bounce: parent.bounce != null ? parent.bounce : 1.0,
+      wallCurve: parent.wallCurve != null ? parent.wallCurve : 0,
+      wallDrift: parent.wallDrift != null ? parent.wallDrift : 0,
+      wallBounceAngleRange: parent.wallBounceAngleRange != null ? parent.wallBounceAngleRange : 0,
+      collisionSpread: parent.collisionSpread != null ? parent.collisionSpread : 0.35,
+      softBody: !!parent.softBody,
+      elasticity: parent.elasticity != null ? parent.elasticity : 0.55,
+      recoverySpeed: parent.recoverySpeed != null ? parent.recoverySpeed : 6.0,
+      wobbleIntensity: parent.wobbleIntensity != null ? parent.wobbleIntensity : 0.45,
+      wobbleDamping: parent.wobbleDamping != null ? parent.wobbleDamping : 7.0,
+      changeColorOnBallCollision: !!parent.changeColorOnBallCollision,
+      deadColor: parent.deadColor || '#3a3a3a',
+      recolorOnFreeze: !!parent.recolorOnFreeze,
+      deathBurstOnFreeze: !!parent.deathBurstOnFreeze,
+      bounceSound: parent.bounceSound || '',
+      bounceSoundOn: parent.bounceSoundOn || 'all',
+      escapeSound: parent.escapeSound || '',
+      destroySound: parent.destroySound || '',
+      deathSound: parent.deathSound || '',
+      collisionHoleEnabled: !!parent.collisionHoleEnabled,
+      collisionHoleSize: parent.collisionHoleSize != null ? parent.collisionHoleSize : 0.42,
+      collisionHoleTarget: parent.collisionHoleTarget || 'auto',
+      collisionHolePlacement: parent.collisionHolePlacement || 'impact',
+      collisionHoleOnCircle: !!parent.collisionHoleOnCircle,
+      collisionHoleOnArc: !!parent.collisionHoleOnArc,
+      collisionHoleOnSpikes: !!parent.collisionHoleOnSpikes,
+      collisionHoleOnSpinner: !!parent.collisionHoleOnSpinner,
+      collisionHoleOnBall: !!parent.collisionHoleOnBall,
+      collisionHoleOnFixedBall: !!parent.collisionHoleOnFixedBall,
+      destroyOnSpike: parent.destroyOnSpike !== false,
+      freezeOnSpike: !!parent.freezeOnSpike,
+      mazeBranchOnFixedBounce: !!parent.mazeBranchOnFixedBounce,
+      mazeBranchSpeed: parent.mazeBranchSpeed != null ? parent.mazeBranchSpeed : speed,
+      mazeBranchGraceFrames: graceFrames,
+      mazeBranchGeneration: nextGeneration,
+      mazeBranchMaxGeneration: parent.mazeBranchMaxGeneration != null ? parent.mazeBranchMaxGeneration : 0,
+      mazeGridCell: parent.mazeGridCell,
+      mazeGridOriginX: parent.mazeGridOriginX,
+      mazeGridOriginY: parent.mazeGridOriginY,
+      mazeExitSide: parent.mazeExitSide,
+      mazeExitX: parent.mazeExitX,
+      mazeExitY: parent.mazeExitY,
+      mazeExitThreshold: parent.mazeExitThreshold,
+      mazeExitSpan: parent.mazeExitSpan,
+      alive: true,
+      age: 0,
+      motion: 'physics',
+      orbitCx: parent.orbitCx != null ? parent.orbitCx : 540,
+      orbitCy: parent.orbitCy != null ? parent.orbitCy : 960,
+      orbitRadius: parent.orbitRadius != null ? parent.orbitRadius : 280,
+      orbitHarmonic: parent.orbitHarmonic != null ? parent.orbitHarmonic : 1,
+      orbitPhase: parent.orbitPhase != null ? parent.orbitPhase : 0,
+      orbitDirection: parent.orbitDirection != null ? parent.orbitDirection : 1,
+      lissaRadiusY: parent.lissaRadiusY != null ? parent.lissaRadiusY : 280,
+      lissaHarmonicY: parent.lissaHarmonicY != null ? parent.lissaHarmonicY : 1,
+      lissaPhaseY: parent.lissaPhaseY != null ? parent.lissaPhaseY : Math.PI / 2,
+      _mazeAxis: Math.abs(dir.x || 0) >= Math.abs(dir.y || 0) ? 'h' : 'v',
+      _mazeDirX: Math.sign(dir.x || 0),
+      _mazeDirY: Math.sign(dir.y || 0),
+      _trail: [],
+      _mazeBranchCooldown: graceFrames,
+      _mazeSplitGroup: seq,
+      _mazeSplitIgnoreBallFrames: splitIgnoreFrames,
+    });
+    for (let i = 0; i < directions.length; i++) {
+      const child = makeChild(directions[i], i + 1);
+      this._setMazeBallDirection(child, directions[i], speed);
+      this._resetMazeBranchVisualState(child);
+      state.objects.push(child);
+    }
+    return seq;
+  }
+
+  _mazeProbeHitsSpinner(x, y, radius, sp) {
+    const armLength = Math.max(10, sp.armLength || 0);
+    const half = armLength * 0.5;
+    const halfThickness = Math.max(2, sp.thickness || 0) * 0.5;
+    const armCount = Math.max(1, sp.armCount | 0);
+    const limit = radius + halfThickness;
+    for (let i = 0; i < armCount; i++) {
+      const a = (sp.rotation || 0) + i * (Math.PI / armCount);
+      const dx = Math.cos(a) * half;
+      const dy = Math.sin(a) * half;
+      const ax = sp.x - dx;
+      const ay = sp.y - dy;
+      const bx = sp.x + dx;
+      const by = sp.y + dy;
+      const closest = closestPointOnSegment(x, y, ax, ay, bx, by);
+      const dist = Math.hypot(x - closest.x, y - closest.y);
+      if (dist < limit) return true;
+    }
+    return false;
+  }
+
+  _mazeDirectionOpen(state, parent, originX, originY, dir, ignoreSpinner = null) {
+    if (!state || !parent || !dir) return false;
+    const travel = Math.max(52, (parent.radius || 0) * 4.2);
+    const samples = 6;
+    const probeRadius = Math.max(3, (parent.radius || 0) * 0.22);
+    const structures = (state.objects || []).filter((o) => o && o.type === 'spinner');
+    for (let i = 1; i <= samples; i++) {
+      const t = i / samples;
+      const px = originX + dir.x * travel * t;
+      const py = originY + dir.y * travel * t;
+      for (const s of structures) {
+        if (ignoreSpinner && s === ignoreSpinner) continue;
+        if (this._mazeProbeHitsSpinner(px, py, probeRadius, s)) return false;
+      }
+    }
+    return true;
+  }
+
+  _maybeMazeBranchOnWallBounce(state, ball, incomingVx, incomingVy, markerRadius = 0, hitWall = null) {
+    if (!state || !ball) return false;
+    if (!ball.alive || ball.fixed || ball._frozen) return false;
+    if (!ball.mazeBranchOnFixedBounce) return false;
+    if ((ball._mazeBranchCooldown || 0) > 0) return false;
+    const ax = Math.abs(incomingVx || 0);
+    const ay = Math.abs(incomingVy || 0);
+    if (ax <= 1e-6 && ay <= 1e-6) return false;
+
+    const horizontalIncoming = ax >= ay;
+    const sign = horizontalIncoming
+      ? (Math.sign(incomingVx || 0) || 1)
+      : (Math.sign(incomingVy || 0) || 1);
+    const directions = horizontalIncoming
+      ? [{ x: 0, y: sign }, { x: 0, y: -sign }]
+      : [{ x: sign, y: 0 }, { x: -sign, y: 0 }];
+    const forwardDir = horizontalIncoming
+      ? { x: sign, y: 0 }
+      : { x: 0, y: sign };
+    const maxGeneration = Math.max(0, ball.mazeBranchMaxGeneration | 0);
+    const nextGeneration = (ball.mazeBranchGeneration | 0) + 1;
+    const graceFrames = Math.max(0, ball.mazeBranchGraceFrames != null ? (ball.mazeBranchGraceFrames | 0) : 6);
+    const speed = Math.max(180, ball.mazeBranchSpeed != null
+      ? Math.abs(ball.mazeBranchSpeed)
+      : Math.hypot(incomingVx || 0, incomingVy || 0));
+    const backoff = Math.max(
+      (ball.radius || 0) + markerRadius + 2,
+      (ball.radius || 0) * 1.2,
+    );
+    const fallbackOriginX = ball.x - forwardDir.x * backoff;
+    const fallbackOriginY = ball.y - forwardDir.y * backoff;
+    const explicitDirections = Array.isArray(hitWall && hitWall.mazeBranchDirs)
+      ? hitWall.mazeBranchDirs
+        .map((dir) => {
+          const x = Math.sign(dir && dir.x || 0);
+          const y = Math.sign(dir && dir.y || 0);
+          return (x || y) ? { x, y } : null;
+        })
+        .filter(Boolean)
+      : null;
+    const originX = hitWall && hitWall.mazeBranchOriginX != null ? hitWall.mazeBranchOriginX : fallbackOriginX;
+    const originY = hitWall && hitWall.mazeBranchOriginY != null ? hitWall.mazeBranchOriginY : fallbackOriginY;
+    const openDirections = explicitDirections || directions.filter((dir) => (
+      this._mazeDirectionOpen(state, ball, originX, originY, dir, hitWall)
+    ));
+
+    if (hitWall && hitWall.mazeBranchTrigger) {
+      if (maxGeneration > 0 && nextGeneration > maxGeneration) return false;
+      if (openDirections.length <= 0) return false;
+      let primaryDir = openDirections[0];
+      let bestDot = -Infinity;
+      for (const dir of openDirections) {
+        const dot = dir.x * (incomingVx || 0) + dir.y * (incomingVy || 0);
+        if (dot > bestDot) {
+          bestDot = dot;
+          primaryDir = dir;
+        }
+      }
+      // Spawn a child ball in EVERY remaining open direction, not just one.
+      // Otherwise a 3-way junction (e.g. S + E + W) would only produce two
+      // balls and one corridor would stay unexplored forever.
+      const extraDirections = openDirections.filter((dir) => dir !== primaryDir);
+      let splitGroup = null;
+      if (extraDirections.length > 0) {
+        splitGroup = this._spawnMazeBranchChildren(state, ball, extraDirections, speed, {
+          markerRadius,
+          spawnOriginX: originX,
+          spawnOriginY: originY,
+          startCentered: true,
+        });
+      }
+      ball.x = originX;
+      ball.y = originY;
+      ball.spawnX = ball.x;
+      ball.spawnY = ball.y;
+      this._setMazeBallDirection(ball, primaryDir, speed);
+      ball.mazeBranchGeneration = nextGeneration;
+      ball._mazeBranchCooldown = graceFrames;
+      ball._mazeSplitGroup = splitGroup;
+      ball._mazeSplitIgnoreBallFrames = splitGroup ? 2 : 0;
+      this._resetMazeBranchVisualState(ball);
+      return extraDirections.length > 0;
+    }
+
+    ball.fixed = true;
+    ball.vx = 0;
+    ball.vy = 0;
+    ball.mazeWall = false;
+    ball._mazeBranchCooldown = Number.POSITIVE_INFINITY;
+
+    this.events.push({
+      type: 'freeze',
+      x: ball.x,
+      y: ball.y,
+      color: ball.color,
+      deathBurst: false,
+      deathSound: 'silent',
+    });
+
+    if (maxGeneration > 0 && nextGeneration > maxGeneration) return true;
+    if (openDirections.length <= 0) return true;
+    this._spawnMazeBranchChildren(state, ball, openDirections, speed, {
+      markerRadius,
+      spawnOriginX: originX,
+      spawnOriginY: originY,
+    });
+    return true;
+  }
+
+  _maybeMazeBranchOnFixedBounce(state, ball, fixedBall, incomingVx, incomingVy) {
+    if (!state || !ball || !fixedBall) return false;
+    if (!fixedBall.mazeWall) return false;
+    if (!ball.mazeBranchOnFixedBounce) return false;
+    return this._maybeMazeBranchOnWallBounce(
+      state,
+      ball,
+      incomingVx,
+      incomingVy,
+      fixedBall.radius || 0,
+    );
+  }
+
+  _collideCircleRing(ball, c, time = 0, state = null) {
     const dx = ball.x - c.x;
     const dy = ball.y - c.y;
     const dist = Math.hypot(dx, dy);
@@ -1006,12 +2490,53 @@ class Physics {
     const nx = dx / dist;
     const ny = dy / dist;
     const angle = Math.atan2(dy, dx);
+    const prevAngle = Math.atan2(prevY - c.y, prevX - c.x);
     const contactKey = c.id || '__circle';
     if (!ball._ringContact) ball._ringContact = Object.create(null);
+    this._debugGap('gapTrace', {
+      ballId: ball.id,
+      colliderId: c.id || null,
+      colliderType: 'circle',
+      x: Number((ball.x || 0).toFixed(2)),
+      y: Number((ball.y || 0).toFixed(2)),
+      prevX: Number((prevX || 0).toFixed(2)),
+      prevY: Number((prevY || 0).toFixed(2)),
+      dist: Number(dist.toFixed(2)),
+      prevDist: Number(prevDist.toFixed(2)),
+      angle: Number(angle.toFixed(4)),
+      prevAngle: Number(prevAngle.toFixed(4)),
+      gapFitNow: ballFitsCircleGap(ball, c, time, angle),
+      time,
+    });
 
-    if (ballFitsCircleGap(ball, c, time, angle)) {
+    if (this._collideCircleGapEdges(ball, c, time, contactKey)) {
+      return true;
+    }
+
+    const sweepDebug = (details) => this._debugGap('gapSweep', {
+      ballId: ball.id,
+      colliderId: c.id || null,
+      colliderType: 'circle',
+      x: Number((ball.x || 0).toFixed(2)),
+      y: Number((ball.y || 0).toFixed(2)),
+      dist: Number(dist.toFixed(2)),
+      prevDist: Number(prevDist.toFixed(2)),
+      angle: Number(angle.toFixed(4)),
+      prevAngle: Number(prevAngle.toFixed(4)),
+      time,
+      ...details,
+    });
+    if (ballSweepsThroughCircleGap(ball, c, time, prevAngle, angle, null, null, sweepDebug)) {
       // Skip wall -> ball can escape through the gap.
       ball._ringContact[contactKey] = false;
+      this._debugGap('gapOpen', {
+        ballId: ball.id,
+        colliderId: c.id || null,
+        colliderType: 'circle',
+        x: Number((ball.x || 0).toFixed(2)),
+        y: Number((ball.y || 0).toFixed(2)),
+        time,
+      });
       return false;
     }
 
@@ -1027,8 +2552,11 @@ class Physics {
       const farOutside = dist > outerLimit + releaseMargin;
       if (farInside || farOutside) ball._ringContact[contactKey] = false;
 
-      const wasInside = prevDist <= innerLimit + releaseMargin;
-      const wasOutside = prevDist >= outerLimit - releaseMargin;
+      // Use the real contact limits for new impacts. `releaseMargin` is only
+      // for de-bouncing an existing contact; using it here makes the ring
+      // reflect a couple of pixels before the ball truly reaches the band.
+      const wasInside = prevDist <= innerLimit;
+      const wasOutside = prevDist >= outerLimit;
       const crossedInner = wasInside && dist > innerLimit;
       const crossedOuter = wasOutside && dist < outerLimit;
       const insideWallBand = dist > innerLimit && dist <= c.radius;
@@ -1081,9 +2609,11 @@ class Physics {
       }
 
       if (push > 0) {
+        const incomingVx = ball.vx || 0;
+        const incomingVy = ball.vy || 0;
         const impactSpeed = Math.abs(ball.vx * reflectNx + ball.vy * reflectNy);
         this._reflect(ball, reflectNx, reflectNy, ball.bounce);
-        this._curveBounce(ball, reflectNx, reflectNy);
+        this._afterWallBounce(ball, reflectNx, reflectNy);
         this._applySoftBodyImpact(ball, reflectNx, reflectNy, impactSpeed);
         if (!ball._ringContact[contactKey]) {
           this.events.push({
@@ -1097,6 +2627,7 @@ class Physics {
             colliderType: 'circle',
             branch,
             bounceSound: ball.bounceSound || '',
+            bounceSoundOn: ball.bounceSoundOn || 'all',
           });
           this._debugCollision('circle', {
             ballId: ball.id,
@@ -1121,6 +2652,12 @@ class Physics {
             insideWallBand,
             outsideWallBand,
           });
+          this._maybeCreateCollisionHole(ball, c, 'circle', state, {
+            anchorX: c.x + Math.cos(angle) * (c.radius || 0),
+            anchorY: c.y + Math.sin(angle) * (c.radius || 0),
+            incomingVx,
+            incomingVy,
+          });
           ball._ringContact[contactKey] = true;
         }
         return true;
@@ -1134,9 +2671,11 @@ class Physics {
         const push = outerLimit - dist;
         ball.x += nx * push;
         ball.y += ny * push;
+        const incomingVx = ball.vx || 0;
+        const incomingVy = ball.vy || 0;
         const impactSpeed = Math.abs(ball.vx * nx + ball.vy * ny);
         this._reflect(ball, nx, ny, ball.bounce);
-        this._curveBounce(ball, nx, ny);
+        this._afterWallBounce(ball, nx, ny);
         this._applySoftBodyImpact(ball, nx, ny, impactSpeed);
         if (!ball._ringContact[contactKey]) {
           this.events.push({
@@ -1150,6 +2689,7 @@ class Physics {
             colliderType: 'circle',
             branch: 'outsideWall',
             bounceSound: ball.bounceSound || '',
+            bounceSoundOn: ball.bounceSoundOn || 'all',
           });
           this._debugCollision('circle', {
             ballId: ball.id,
@@ -1166,6 +2706,12 @@ class Physics {
             gapSize: Number((effectiveCircleGapSize(c, time) || 0).toFixed(3)),
             insideOnly: !!c.insideOnly,
           });
+          this._maybeCreateCollisionHole(ball, c, 'circle', state, {
+            anchorX: c.x + Math.cos(angle) * (c.radius || 0),
+            anchorY: c.y + Math.sin(angle) * (c.radius || 0),
+            incomingVx,
+            incomingVy,
+          });
           ball._ringContact[contactKey] = true;
         }
         return true;
@@ -1174,7 +2720,7 @@ class Physics {
     return false;
   }
 
-  _collideArc(ball, a) {
+  _collideArc(ball, a, state = null) {
     const dx = ball.x - a.x;
     const dy = ball.y - a.y;
     const dist = Math.hypot(dx, dy);
@@ -1188,13 +2734,15 @@ class Physics {
     const outer = a.radius + a.thickness / 2 + ball.radius;
 
     if (dist > inner && dist < outer) {
+      const incomingVx = ball.vx || 0;
+      const incomingVy = ball.vy || 0;
       if (dist < a.radius) {
         // Hit from the inside -> push ball inward and reflect off outward normal.
         const push = inner - dist;
         ball.x += nx * push; ball.y += ny * push;
         const impactSpeed = Math.abs(ball.vx * -nx + ball.vy * -ny);
         this._reflect(ball, -nx, -ny, ball.bounce);
-        this._curveBounce(ball, -nx, -ny);
+        this._afterWallBounce(ball, -nx, -ny);
         this._applySoftBodyImpact(ball, -nx, -ny, impactSpeed);
       } else {
         // Hit from the outside -> push outward and reflect off inward normal.
@@ -1202,7 +2750,7 @@ class Physics {
         ball.x += nx * push; ball.y += ny * push;
         const impactSpeed = Math.abs(ball.vx * nx + ball.vy * ny);
         this._reflect(ball, nx, ny, ball.bounce);
-        this._curveBounce(ball, nx, ny);
+        this._afterWallBounce(ball, nx, ny);
         this._applySoftBodyImpact(ball, nx, ny, impactSpeed);
       }
       this.events.push({
@@ -1215,6 +2763,7 @@ class Physics {
         colliderId: a.id || null,
         colliderType: 'arc',
         bounceSound: ball.bounceSound || '',
+        bounceSoundOn: ball.bounceSoundOn || 'all',
       });
       this._debugCollision('arc', {
         ballId: ball.id,
@@ -1227,12 +2776,18 @@ class Physics {
         outer: Number(outer.toFixed(2)),
         angle: Number(angle.toFixed(3)),
       });
+      this._maybeCreateCollisionHole(ball, a, 'arc', state, {
+        anchorX: a.x + Math.cos(angle) * (a.radius || 0),
+        anchorY: a.y + Math.sin(angle) * (a.radius || 0),
+        incomingVx,
+        incomingVy,
+      });
       return true;
     }
     return false;
   }
 
-  _collideSpiral(ball, sp) {
+  _collideSpiral(ball, sp, state = null) {
     // Match the renderer exactly: each spiral layer is a visible arc, not a
     // full hidden ring. The previous fake-circle approach created invisible
     // collision walls across the gap, which is why balls appeared to bounce on
@@ -1243,6 +2798,7 @@ class Physics {
     for (let i = 0; i < layers; i++) {
       const r = sp.innerRadius + step * (i + 0.5);
       const fakeArc = {
+        type: 'arc',
         x: sp.x, y: sp.y,
         radius: r,
         thickness: sp.thickness,
@@ -1251,12 +2807,12 @@ class Physics {
         endAngle: Math.PI * 2,
         color: sp.color,
       };
-      if (this._collideArc(ball, fakeArc)) hit = true;
+      if (this._collideArc(ball, fakeArc, state)) hit = true;
     }
     return hit;
   }
 
-  _collideSpikes(ball, sp) {
+  _collideSpikes(ball, sp, state = null) {
     const dx = ball.x - sp.x;
     const dy = ball.y - sp.y;
     const dist = Math.hypot(dx, dy);
@@ -1331,9 +2887,11 @@ class Physics {
         const normalSign = sp.inward ? -1 : 1;
         const reflectNx = nx * normalSign;
         const reflectNy = ny * normalSign;
+        const incomingVx = ball.vx || 0;
+        const incomingVy = ball.vy || 0;
         const impactSpeed = Math.abs(ball.vx * reflectNx + ball.vy * reflectNy);
         this._reflect(ball, reflectNx, reflectNy, ball.bounce);
-        this._curveBounce(ball, reflectNx, reflectNy);
+        this._afterWallBounce(ball, reflectNx, reflectNy);
         this._applySoftBodyImpact(ball, reflectNx, reflectNy, impactSpeed);
         ball.x += nx * 2;
         ball.y += ny * 2;
@@ -1347,6 +2905,7 @@ class Physics {
           colliderId: sp.id,
           colliderType: 'spikes',
           bounceSound: ball.bounceSound || '',
+          bounceSoundOn: ball.bounceSoundOn || 'all',
         });
         this._debugCollision('spikes', {
           ballId: ball.id,
@@ -1358,6 +2917,12 @@ class Physics {
           spikeIndex: idx,
           spikeAngle: Number(spikeAngle.toFixed(3)),
           inward: !!sp.inward,
+        });
+        this._maybeCreateCollisionHole(ball, sp, 'spikes', state, {
+          anchorX: tipX,
+          anchorY: tipY,
+          incomingVx,
+          incomingVy,
         });
       }
       return true;
@@ -1383,6 +2948,287 @@ function segmentDistance(px, py, ax, ay, bx, by) {
   t = Math.max(0, Math.min(1, t));
   const cx = ax + abx * t, cy = ay + aby * t;
   return Math.hypot(px - cx, py - cy);
+}
+
+function closestPointOnSegment(px, py, ax, ay, bx, by) {
+  const abx = bx - ax, aby = by - ay;
+  const lenSq = abx * abx + aby * aby;
+  if (lenSq === 0) return { x: ax, y: ay, t: 0 };
+  let t = ((px - ax) * abx + (py - ay) * aby) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return { x: ax + abx * t, y: ay + aby * t, t };
+}
+
+function closestPointsBetweenSegments(ax, ay, bx, by, cx, cy, dx, dy) {
+  const ux = bx - ax, uy = by - ay;
+  const vx = dx - cx, vy = dy - cy;
+  const wx = ax - cx, wy = ay - cy;
+  const a = ux * ux + uy * uy;
+  const b = ux * vx + uy * vy;
+  const c = vx * vx + vy * vy;
+  const d = ux * wx + uy * wy;
+  const e = vx * wx + vy * wy;
+  const EPS = 1e-9;
+  let sN, sD = a * c - b * b;
+  let tN, tD = sD;
+
+  if (sD < EPS) {
+    sN = 0;
+    sD = 1;
+    tN = e;
+    tD = c;
+  } else {
+    sN = (b * e - c * d);
+    tN = (a * e - b * d);
+    if (sN < 0) {
+      sN = 0;
+      tN = e;
+      tD = c;
+    } else if (sN > sD) {
+      sN = sD;
+      tN = e + b;
+      tD = c;
+    }
+  }
+
+  if (tN < 0) {
+    tN = 0;
+    if (-d < 0) sN = 0;
+    else if (-d > a) sN = sD;
+    else { sN = -d; sD = a; }
+  } else if (tN > tD) {
+    tN = tD;
+    if ((-d + b) < 0) sN = 0;
+    else if ((-d + b) > a) sN = sD;
+    else { sN = (-d + b); sD = a; }
+  }
+
+  const sc = Math.abs(sN) < EPS ? 0 : sN / sD;
+  const tc = Math.abs(tN) < EPS ? 0 : tN / tD;
+  return {
+    px: ax + sc * ux,
+    py: ay + sc * uy,
+    qx: cx + tc * vx,
+    qy: cy + tc * vy,
+    sc,
+    tc,
+  };
+}
+
+function findCircleGapEdgeContact(ball, c, time = 0, margin = 0) {
+  const rawGap = effectiveCircleGapSize(c, time);
+  if (!(rawGap > 0)) return null;
+  const halfThickness = (c.thickness || 0) * 0.5;
+  const innerR = Math.max(1, (c.radius || 0) - halfThickness);
+  const outerR = Math.max(innerR + 1e-6, (c.radius || 0) + halfThickness);
+  const rot = c.rotation || 0;
+  const prevRot = c._prevRotation != null ? c._prevRotation : rot;
+  const rotDelta = shortestAngleDelta(prevRot, rot);
+  const edgeAngles = [
+    { prev: c.gapStart + prevRot, curr: c.gapStart + rot, edgeIndex: 0 },
+    { prev: c.gapStart + prevRot + rawGap, curr: c.gapStart + rot + rawGap, edgeIndex: 1 },
+  ];
+  const prevX = ball._prevX != null ? ball._prevX : ball.x;
+  const prevY = ball._prevY != null ? ball._prevY : ball.y;
+  const relPrevX = prevX - c.x;
+  const relPrevY = prevY - c.y;
+  const relCurrX = ball.x - c.x;
+  const relCurrY = ball.y - c.y;
+  const bandIntervals = circleBandIntervalsOnSegment(
+    relPrevX,
+    relPrevY,
+    relCurrX,
+    relCurrY,
+    Math.max(1e-6, innerR - (ball.radius || 0) - margin),
+    outerR + (ball.radius || 0) + margin,
+  );
+  if (!bandIntervals.length) return null;
+  const traversal = selectCircleGapTraversalInterval(
+    bandIntervals,
+    Math.hypot(relPrevX, relPrevY),
+    Math.hypot(relCurrX, relCurrY),
+    Math.max(1e-6, innerR - (ball.radius || 0) - margin),
+    outerR + (ball.radius || 0) + margin,
+  ) || bandIntervals[0];
+  const motionLen = Math.hypot(ball.x - prevX, ball.y - prevY);
+  const sampleCount = Math.max(
+    25,
+    Math.min(121, gapTraversalSampleCount(ball, c, traversal.start, traversal.end, motionLen, rotDelta) * 4),
+  );
+  const samples = sampleIntervalTimes(traversal.start, traversal.end, sampleCount);
+  const hitThreshold = (ball.radius || 0) + margin;
+  let best = null;
+  const considerHit = (dist, dx, dy, closest, edgeIndex, edgeAngle, t) => {
+    if (!(dist < hitThreshold)) return;
+    const candidate = {
+      dist,
+      dx,
+      dy,
+      closest,
+      edgeIndex,
+      edgeAngle,
+      t,
+    };
+    if (!best) {
+      best = candidate;
+      return;
+    }
+    const bestT = best.t != null ? best.t : Infinity;
+    const nextT = t != null ? t : Infinity;
+    if (nextT < bestT - 1e-6 || (Math.abs(nextT - bestT) <= 1e-6 && dist < best.dist)) {
+      best = candidate;
+    }
+  };
+
+  for (const edge of edgeAngles) {
+    for (let i = 0; i < samples.length; i++) {
+      const t = samples[i];
+      const px = lerp(prevX, ball.x, t);
+      const py = lerp(prevY, ball.y, t);
+      const edgeAngle = edge.prev + rotDelta * t;
+      const ax = c.x + Math.cos(edgeAngle) * innerR;
+      const ay = c.y + Math.sin(edgeAngle) * innerR;
+      const bx = c.x + Math.cos(edgeAngle) * outerR;
+      const by = c.y + Math.sin(edgeAngle) * outerR;
+      const closest = closestPointOnSegment(px, py, ax, ay, bx, by);
+      considerHit(
+        Math.hypot(px - closest.x, py - closest.y),
+        px - closest.x,
+        py - closest.y,
+        { x: closest.x, y: closest.y },
+        edge.edgeIndex,
+        edgeAngle,
+        t,
+      );
+      considerHit(
+        Math.hypot(px - ax, py - ay),
+        px - ax,
+        py - ay,
+        { x: ax, y: ay },
+        edge.edgeIndex,
+        edgeAngle,
+        t,
+      );
+      considerHit(
+        Math.hypot(px - bx, py - by),
+        px - bx,
+        py - by,
+        { x: bx, y: by },
+        edge.edgeIndex,
+        edgeAngle,
+        t,
+      );
+      if (i >= samples.length - 1) continue;
+      const tNext = samples[i + 1];
+      const nextPx = lerp(prevX, ball.x, tNext);
+      const nextPy = lerp(prevY, ball.y, tNext);
+      const nextEdgeAngle = edge.prev + rotDelta * tNext;
+      const nextAx = c.x + Math.cos(nextEdgeAngle) * innerR;
+      const nextAy = c.y + Math.sin(nextEdgeAngle) * innerR;
+      const nextBx = c.x + Math.cos(nextEdgeAngle) * outerR;
+      const nextBy = c.y + Math.sin(nextEdgeAngle) * outerR;
+      const cornerSweeps = [
+        { x0: ax, y0: ay, x1: nextAx, y1: nextAy },
+        { x0: bx, y0: by, x1: nextBx, y1: nextBy },
+      ];
+      for (const seg of cornerSweeps) {
+        const sweep = closestPointsBetweenSegments(
+          px, py, nextPx, nextPy,
+          seg.x0, seg.y0, seg.x1, seg.y1,
+        );
+        const dx = sweep.px - sweep.qx;
+        const dy = sweep.py - sweep.qy;
+        const dist = Math.hypot(dx, dy);
+        considerHit(
+          dist,
+          dx,
+          dy,
+          { x: sweep.qx, y: sweep.qy },
+          edge.edgeIndex,
+          edge.prev + rotDelta * lerp(t, tNext, sweep.tc),
+          lerp(t, tNext, sweep.sc),
+        );
+      }
+    }
+  }
+  return best;
+}
+
+function segmentCircleIntersectionTimes(ax, ay, bx, by, radius) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const qa = dx * dx + dy * dy;
+  if (qa <= 1e-12) return [];
+  const qb = 2 * (ax * dx + ay * dy);
+  const qc = ax * ax + ay * ay - radius * radius;
+  const disc = qb * qb - 4 * qa * qc;
+  if (disc < 0) return [];
+  if (disc < 1e-12) {
+    const t = -qb / (2 * qa);
+    return t >= 0 && t <= 1 ? [t] : [];
+  }
+  const sqrtDisc = Math.sqrt(disc);
+  const t0 = (-qb - sqrtDisc) / (2 * qa);
+  const t1 = (-qb + sqrtDisc) / (2 * qa);
+  const out = [];
+  if (t0 >= 0 && t0 <= 1) out.push(t0);
+  if (t1 >= 0 && t1 <= 1 && Math.abs(t1 - t0) > 1e-6) out.push(t1);
+  out.sort((a, b) => a - b);
+  return out;
+}
+
+function circleBandIntervalsOnSegment(ax, ay, bx, by, innerR, outerR) {
+  if (!(outerR > innerR)) return [];
+  const times = [0, 1];
+  for (const t of segmentCircleIntersectionTimes(ax, ay, bx, by, innerR)) times.push(t);
+  for (const t of segmentCircleIntersectionTimes(ax, ay, bx, by, outerR)) times.push(t);
+  times.sort((a, b) => a - b);
+  const unique = [];
+  for (const t of times) {
+    if (!unique.length || Math.abs(unique[unique.length - 1] - t) > 1e-6) unique.push(t);
+  }
+  const out = [];
+  for (let i = 0; i < unique.length - 1; i++) {
+    const start = unique[i];
+    const end = unique[i + 1];
+    if (end - start <= 1e-6) continue;
+    const mid = (start + end) * 0.5;
+    const px = lerp(ax, bx, mid);
+    const py = lerp(ay, by, mid);
+    const dist = Math.hypot(px, py);
+    if (dist >= innerR - 1e-6 && dist <= outerR + 1e-6) {
+      out.push({ start, end });
+    }
+  }
+  return out;
+}
+
+function selectCircleGapTraversalInterval(intervals, prevDist, currDist, innerR, outerR) {
+  if (!intervals.length) return null;
+  const outward = currDist >= prevDist;
+  const insideAtStart = prevDist >= innerR - 1e-6 && prevDist <= outerR + 1e-6;
+  if (insideAtStart) {
+    return intervals.find((interval) => interval.start <= 1e-6) || intervals[0];
+  }
+  return outward ? intervals[0] : intervals[intervals.length - 1];
+}
+
+function gapTraversalSampleCount(ball, c, start, end, motionLen, rotationDelta) {
+  const span = Math.max(1e-6, end - start);
+  const rotationalTravel = Math.abs(rotationDelta) * Math.max(1, c.radius || 0);
+  const scale = motionLen + rotationalTravel;
+  const base = 9 + Math.ceil(scale * span / Math.max(4, (ball.radius || 0) * 0.45));
+  return Math.max(9, Math.min(41, base));
+}
+
+function sampleIntervalTimes(start, end, count = 5) {
+  if (!(end > start)) return [start];
+  const out = [];
+  const n = Math.max(2, count | 0);
+  for (let i = 0; i < n; i++) {
+    out.push(lerp(start, end, i / (n - 1)));
+  }
+  return out;
 }
 
 window.Physics = Physics;
