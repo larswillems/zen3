@@ -47,6 +47,7 @@ const SOUND_PRESETS = {
     { value: '',         label: 'Default (saw + noise)' },
     { value: 'crunch',   label: 'Crunch' },
     { value: 'glass',    label: 'Glass shatter' },
+    { value: 'hollowEcho', label: 'Hollow echo' },
     { value: 'pop',      label: 'Pop' },
     { value: 'poof',     label: 'Poof (soft)' },
     { value: 'explode',  label: 'Explode' },
@@ -739,6 +740,10 @@ class AudioEngine {
           e._shimmer(ctx, dest, t0, 0.35);
           e._blip(ctx, dest, t0, 2200, { pan, gain: 0.2, attack: 0.001, decay: 0.08, wave: 'triangle' });
         },
+        hollowEcho: (e, ctx, dest, t0, ev, pan, step) => {
+          const base = e._midiToFreq(e._pickNote(step + 7));
+          e._hollowEcho(ctx, dest, t0, { pan, freq: base * 0.75, gain: 0.34 });
+        },
         pop: (e, ctx, dest, t0, ev, pan, step) => {
           const f = e._midiToFreq(e._pickNote(step));
           e._blip(ctx, dest, t0, f * 1.5, { pan, gain: 0.42, attack: 0.001, decay: 0.08, wave: 'triangle' });
@@ -887,6 +892,15 @@ class AudioEngine {
           }
           break;
         }
+        case 'heartEat': {
+          const sound = ev.heartSound || 'pop';
+          if (String(sound).startsWith('asset:')) {
+            this._playUploadedAsset(ctx, dest, t0, String(sound).slice(6), pan, 1);
+          } else if (sound && sound !== 'silent') {
+            this._playPreset('bounce', sound, ctx, dest, t0, ev, pan, step);
+          }
+          break;
+        }
         case 'freeze': {
           const override = ev.deathSound || '';
           if (String(override).startsWith('asset:')) {
@@ -930,6 +944,10 @@ class AudioEngine {
           if (!throttle('escape', 0.25)) break;
           if (this._playConfiguredGapSound(ctx, dest, t0, ev, pan, step)) break;
           const override = ev.escapeSound || '';
+          if (String(override).startsWith('asset:')) {
+            this._playUploadedAsset(ctx, dest, t0, String(override).slice(6), pan, 1);
+            break;
+          }
           if (override && this._playPreset('escape', override, ctx, dest, t0, ev, pan, step)) break;
           const base = this._midiToFreq(this._pickNote(step));
           this._sweep(ctx, dest, t0, {

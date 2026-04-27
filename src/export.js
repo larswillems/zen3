@@ -115,9 +115,13 @@ class ExportManager {
         fn: (i, events, alive) => {
           if (finishAt < 0) {
             const finishEvent = Array.isArray(events) ? events.find((e) => e && e.type === 'finish') : null;
-            if (finishEvent) {
+            const finishedState = !!(this.simulator && this.simulator.state && this.simulator.state._finished);
+            if (finishEvent || finishedState) {
               finishAt = i;
-              finishTailFrames = Math.max(0, Math.ceil(Math.max(0, Number(finishEvent.tail) || 0) * fps));
+              const tail = finishEvent
+                ? finishEvent.tail
+                : (this.simulator.state && this.simulator.state._finishTail);
+              finishTailFrames = Math.max(0, Math.ceil(Math.max(0, Number(tail) || 0) * fps));
             }
           }
           if (finishAt >= 0 && (i - finishAt) >= finishTailFrames) return 'stop';
@@ -248,7 +252,7 @@ class ExportManager {
         }
         events.update(sim.state, evs);
         lastEvents = lastEvents.concat(evs);
-        if (speedState.paused) {
+        if (speedState.paused || (sim.state && sim.state._finished)) {
           accRef.value = 0;
           break;
         }

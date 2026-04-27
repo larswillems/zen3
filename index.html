@@ -116,52 +116,103 @@
     <aside class="panel left" id="left-panel">
       <div class="panel-scroll">
       <h2>Presets</h2>
-      <div class="add-grid">
-        <button id="preset-harmonic" class="preset">Harmonic Orbits</button>
-        <button id="preset-battle" class="preset">Battle of the Colors</button>
-        <button id="preset-twinkle" class="preset">Twinkle Bounce</button>
-        <button id="preset-escape" class="preset">Chaos Theory</button>
-        <button id="preset-onehp" class="preset">1 HP to Escape</button>
-        <button id="preset-onechance-4" class="preset">One Chance 4+1</button>
-        <button id="preset-onechance-6" class="preset">One Chance 6+1</button>
-        <button id="preset-onechance-8" class="preset">One Chance 8+1</button>
-        <button id="preset-gap-static-1" class="preset">Gap Static 1</button>
-        <button id="preset-gap-static-2" class="preset">Gap Static 2</button>
-        <button id="preset-gap-static-3" class="preset">Gap Static 3</button>
-        <button id="preset-gap-static-4" class="preset">Gap Static 4</button>
-        <button id="preset-gap-static-5" class="preset">Gap Static 5</button>
-        <button id="preset-gap-static-6" class="preset">Gap Static 6</button>
-        <button id="preset-gap-rotate-pass" class="preset">Gap Pass Rotate</button>
-        <button id="preset-gap-rotate-graze" class="preset">Gap Graze Rotate</button>
-        <button id="preset-timed" class="preset">4 Sec to Escape</button>
-        <button id="preset-timed3" class="preset">3 Sec to Escape</button>
-        <button id="preset-burning-rings" class="preset">Burning Rings</button>
-        <button id="preset-plinko" class="preset">Pyramid Plinko</button>
-        <button id="preset-neon-pinball" class="preset">Neon Pinball</button>
-        <button id="preset-classic-pinball" class="preset">Classic Pinball</button>
-        <button id="preset-easter" class="preset">Paasei Plinko</button>
-        <button id="preset-easter-orbit" class="preset">Egg Hunt Orbit</button>
-        <button id="preset-memory" class="preset">Memory Maze</button>
-        <button id="preset-rhythm" class="preset">Rhythm Drop</button>
-        <button id="preset-prediction" class="preset">Prediction Gates</button>
-        <button id="preset-legend-spikes" class="preset">Last To Survive</button>
-        <button id="preset-giant-marbles" class="preset">Giant Marble Gauntlet</button>
-        <button id="preset-spinner-storm" class="preset">Spinner Storm</button>
-        <button id="preset-branch-maze-a" class="preset">Repo Maze A</button>
-        <button id="preset-branch-maze-b" class="preset">Repo Maze B</button>
-        <button id="preset-branch-maze-c" class="preset">Repo Maze C</button>
-        <button id="preset-branch-maze-d" class="preset">Repo Maze D</button>
-        <button id="preset-branch-maze-tower" class="preset">The Long Way Out</button>
-        <button id="preset-branch-maze-tower-b" class="preset">The Long Way Out II</button>
-        <button id="preset-branch-maze-tower-c" class="preset">The Long Way Out III</button>
-        <button id="preset-branch-maze-tower-d" class="preset">The Long Way Out IV</button>
-        <button id="preset-branch-maze-tower-e" class="preset">The Long Way Out V</button>
-        <button id="preset-branch-maze-count" class="preset">Balls to Escape</button>
-        <button id="preset-branch-maze-count-b" class="preset">Balls to Escape II</button>
-        <button id="preset-branch-maze-count-c" class="preset">Balls to Escape III</button>
-        <button id="preset-branch-maze-count-d" class="preset">Balls to Escape IV</button>
-        <button id="preset-branch-maze-count-e" class="preset">Balls to Escape V</button>
-        <button id="preset-wobble" class="preset">Liquid Wobble Demo</button>
+      <div class="preset-groups">
+        <details class="preset-group" open>
+          <summary>100% Determination</summary>
+          <div class="add-grid">
+            <button id="preset-determination" class="preset">100% Determination</button>
+            <button id="preset-crystal-spiral" class="preset">Crystal Spiral</button>
+            <button id="preset-starlight-spiral" class="preset">Starlight Spiral</button>
+            <button id="preset-bubble-spiral" class="preset">Bubble Spiral</button>
+            <button id="preset-neon-bolt-spiral" class="preset">Neon Bolt Spiral</button>
+            <button id="preset-candy-drop-spiral" class="preset">Candy Drop Spiral</button>
+            <button id="preset-moonlit-spiral" class="preset">Moonlit Spiral</button>
+            <button id="preset-blossom-spiral" class="preset">Blossom Spiral</button>
+            <button id="preset-ember-spiral" class="preset">Ember Spiral</button>
+            <button id="preset-frost-rune-spiral" class="preset">Frost Rune Spiral</button>
+          </div>
+        </details>
+        <details class="preset-group">
+          <summary>Featured & Challenges</summary>
+          <div class="add-grid">
+            <button id="preset-onehp" class="preset">1 HP to Escape</button>
+            <button id="preset-onechance-4" class="preset">One Chance 4+1</button>
+            <button id="preset-onechance-6" class="preset">One Chance 6+1</button>
+            <button id="preset-onechance-8" class="preset">One Chance 8+1</button>
+            <button id="preset-timed" class="preset">4 Sec to Escape</button>
+            <button id="preset-timed2" class="preset">2 Sec to Escape</button>
+            <button id="preset-timed3" class="preset">3 Sec to Escape</button>
+            <button id="preset-legend-spikes" class="preset">Last To Survive</button>
+          </div>
+        </details>
+        <details class="preset-group">
+          <summary>Loop & Motion</summary>
+          <div class="add-grid">
+            <button id="preset-harmonic" class="preset">Harmonic Orbits</button>
+            <button id="preset-battle" class="preset">Battle of the Colors</button>
+            <button id="preset-twinkle" class="preset">Twinkle Bounce</button>
+            <button id="preset-escape" class="preset">Chaos Theory</button>
+            <button id="preset-burning-rings" class="preset">Burning Rings</button>
+            <button id="preset-wobble" class="preset">Liquid Wobble Demo</button>
+            <button id="preset-giant-marbles" class="preset">Giant Marble Gauntlet</button>
+            <button id="preset-spinner-storm" class="preset">Spinner Storm</button>
+          </div>
+        </details>
+        <details class="preset-group">
+          <summary>Gap Tests</summary>
+          <div class="add-grid">
+            <button id="preset-gap-static-1" class="preset">Gap Static 1</button>
+            <button id="preset-gap-static-2" class="preset">Gap Static 2</button>
+            <button id="preset-gap-static-3" class="preset">Gap Static 3</button>
+            <button id="preset-gap-static-4" class="preset">Gap Static 4</button>
+            <button id="preset-gap-static-5" class="preset">Gap Static 5</button>
+            <button id="preset-gap-static-6" class="preset">Gap Static 6</button>
+            <button id="preset-gap-rotate-pass" class="preset">Gap Pass Rotate</button>
+            <button id="preset-gap-rotate-graze" class="preset">Gap Graze Rotate</button>
+          </div>
+        </details>
+        <details class="preset-group">
+          <summary>Arcade & Game Boards</summary>
+          <div class="add-grid">
+            <button id="preset-plinko" class="preset">Pyramid Plinko</button>
+            <button id="preset-neon-pinball" class="preset">Neon Pinball</button>
+            <button id="preset-classic-pinball" class="preset">Classic Pinball</button>
+            <button id="preset-easter" class="preset">Paasei Plinko</button>
+            <button id="preset-easter-orbit" class="preset">Egg Hunt Orbit</button>
+            <button id="preset-memory" class="preset">Memory Maze</button>
+            <button id="preset-rhythm" class="preset">Rhythm Drop</button>
+            <button id="preset-prediction" class="preset">Prediction Gates</button>
+          </div>
+        </details>
+        <details class="preset-group">
+          <summary>Repo Mazes</summary>
+          <div class="add-grid">
+            <button id="preset-branch-maze-a" class="preset">Repo Maze A</button>
+            <button id="preset-branch-maze-b" class="preset">Repo Maze B</button>
+            <button id="preset-branch-maze-c" class="preset">Repo Maze C</button>
+            <button id="preset-branch-maze-d" class="preset">Repo Maze D</button>
+          </div>
+        </details>
+        <details class="preset-group">
+          <summary>Long Way Out</summary>
+          <div class="add-grid">
+            <button id="preset-branch-maze-tower" class="preset">The Long Way Out</button>
+            <button id="preset-branch-maze-tower-b" class="preset">The Long Way Out II</button>
+            <button id="preset-branch-maze-tower-c" class="preset">The Long Way Out III</button>
+            <button id="preset-branch-maze-tower-d" class="preset">The Long Way Out IV</button>
+            <button id="preset-branch-maze-tower-e" class="preset">The Long Way Out V</button>
+          </div>
+        </details>
+        <details class="preset-group">
+          <summary>Balls To Escape</summary>
+          <div class="add-grid">
+            <button id="preset-branch-maze-count" class="preset">Balls to Escape</button>
+            <button id="preset-branch-maze-count-b" class="preset">Balls to Escape II</button>
+            <button id="preset-branch-maze-count-c" class="preset">Balls to Escape III</button>
+            <button id="preset-branch-maze-count-d" class="preset">Balls to Escape IV</button>
+            <button id="preset-branch-maze-count-e" class="preset">Balls to Escape V</button>
+          </div>
+        </details>
       </div>
 
       <h2>Add</h2>
@@ -222,6 +273,7 @@
 
       <h2>Loop Tools</h2>
       <button id="btn-snap-rotations" class="full">Snap all rotations to loop</button>
+      <button id="btn-test-determination" class="full">Test Determination attempts</button>
       <div id="branch-maze-controls" hidden>
         <h2>Branch Maze</h2>
         <div class="prop-row">
@@ -234,6 +286,7 @@
       <div class="section-header">
         <h2>Outline</h2>
         <button id="btn-random-colors" class="mini section-action" title="Generate a random color combo">Random colors</button>
+        <button id="btn-bright-colors" class="mini section-action" title="Generate random bright colors">Bright colors</button>
       </div>
       <ul id="outline-list" class="outline"></ul>
 

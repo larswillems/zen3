@@ -46,7 +46,7 @@ function upgradeLegacyFinishFlow(sc) {
     return sc;
   }
   const ec = sc.endCondition || null;
-  const applyUpgrade = (sourceTrigger, matchesRule) => {
+  const applyUpgrade = (sourceTrigger, matchesRule, finishSeconds = 1.5) => {
     let converted = false;
     for (const rule of sc.events) {
       if (!rule || !rule.trigger || !matchesRule(rule.trigger)) continue;
@@ -58,28 +58,38 @@ function upgradeLegacyFinishFlow(sc) {
       id: makeUniqueScenarioRuleId(sc.events, 'finish_start'),
       once: true,
       trigger: sourceTrigger,
-      action: { type: 'finish', seconds: 1.5 },
+      action: { type: 'finish', seconds: Math.max(0, Number(finishSeconds) || 0) },
     });
     sc.endCondition = { type: 'finish' };
     sc.stopOnFirstEscape = false;
   };
 
   if (ec && ec.type === 'firstEscapeTail') {
-    applyUpgrade({ type: 'firstEscape' }, (trigger) => trigger && trigger.type === 'firstEscape');
+    applyUpgrade(
+      { type: 'firstEscape' },
+      (trigger) => trigger && trigger.type === 'firstEscape',
+      ec.tail != null ? ec.tail : 1.5,
+    );
   } else if (ec && ec.type === 'ballCountTail') {
     const count = Math.max(0, ec.count | 0);
     applyUpgrade(
       { type: 'ballCount', count },
       (trigger) => trigger && trigger.type === 'ballCount' && Math.max(0, trigger.count | 0) === count,
+      ec.tail != null ? ec.tail : 1.5,
     );
   } else if (ec && ec.type === 'bucketHitTail') {
     const bucketId = String(ec.bucketId || '');
     applyUpgrade(
       { type: 'bucketHit', bucketId },
       (trigger) => trigger && trigger.type === 'bucketHit' && String(trigger.bucketId || '') === bucketId,
+      ec.tail != null ? ec.tail : 1.5,
     );
   } else if (ec && ec.type === 'allBallsGone') {
-    applyUpgrade({ type: 'allGone' }, (trigger) => trigger && trigger.type === 'allGone');
+    applyUpgrade(
+      { type: 'allGone' },
+      (trigger) => trigger && trigger.type === 'allGone',
+      ec.tail != null ? ec.tail : 1.5,
+    );
   }
   return sc;
 }
@@ -350,7 +360,7 @@ class Simulator {
     this.state = {
       loopDuration: this.scenario.loopDuration,
       objects: this._initialObjects.map((o) => {
-        const obj = { ...o, alive: true, age: 0 };
+        const obj = { ...o, alive: !o.templateOnly, age: 0 };
         if (obj.type === 'ball') { obj._trail = []; obj._frozen = false; obj._escaped = false; }
         if (obj.type === 'timer') { obj._timerStartElapsed = 0; }
         return obj;

@@ -47,6 +47,14 @@ function angleInGap(a, gapStart, gapSize, rotation) {
   return a > start + edgeEps || a < end - edgeEps;
 }
 
+function spikeInGap(relAngle, gapStart, gapSize) {
+  if (gapSize <= 0) return false;
+  const start = normalizeAngle(gapStart);
+  const end = normalizeAngle(start + gapSize);
+  const a = normalizeAngle(relAngle);
+  return start <= end ? (a >= start && a <= end) : (a >= start || a <= end);
+}
+
 function ballFitsCircleGap(ball, c, time = 0, angle = null, rotationOverride = null) {
   const rawGap = effectiveCircleGapSize(c, time);
   if (rawGap <= 0) return false;
@@ -530,7 +538,10 @@ class Physics {
       return true;
     }
 
-    if (cfg.outcome === 'launchUp') {
+    if (cfg.outcome === 'pass') {
+      // Pure pass-through: keep the ball's real physics velocity. This is used
+      // for entry gates where crossing a gap should not count as an escape.
+    } else if (cfg.outcome === 'launchUp') {
       ball.vx = nx * speed * 0.35;
       ball.vy = -Math.max(420, speed * 1.15);
     } else if (cfg.outcome === 'launchDown') {
@@ -940,7 +951,7 @@ class Physics {
     this.events.length = 0;
     if (state.score == null) state.score = 0;
     const balls = state.objects.filter((o) => o.type === 'ball' && o.alive);
-    const structures = state.objects.filter((o) => o.type !== 'ball' && o.type !== 'spawner' && o.type !== 'scoreBin' && !o._gapRemoved);
+    const structures = state.objects.filter((o) => o.type !== 'ball' && o.type !== 'spawner' && o.type !== 'scoreBin' && !o._gapRemoved && !o.visualOnly);
     const scoreBins = state.objects.filter((o) => o.type === 'scoreBin');
     const spawners = state.objects.filter((o) => o.type === 'spawner');
 
@@ -1046,10 +1057,11 @@ class Physics {
         continue;
       }
 
-      if (ball.motion === 'orbit' || ball.motion === 'lissajous') {
+      if (ball.motion === 'orbit' || ball.motion === 'lissajous' || ball.motion === 'spiralPath') {
         // Parametric, perfectly-looping motion. No gravity, no collisions --
         // the satisfying path is the source of truth.
         this._integrateParametric(ball, state.time + dt, loopDuration, dt);
+        this._consumeTouchedSpikes(ball, structures, state);
       } else {
         // Classic physics path. Fast balls get micro-stepped so thin rotating
         // gap edges are checked multiple times within one frame.
@@ -1067,9 +1079,24 @@ class Physics {
           this._setStructureRotationsForSubstep(structures, startT, endT);
           ball._prevX = ball.x;
           ball._prevY = ball.y;
-          ball.vy += this.gravity * subDt;
-          if (this.friction > 0) {
-            const f = Math.max(0, 1 - this.friction * subDt);
+          const gravityScaleDelay = Number.isFinite(ball.gravityScaleDelay) ? Math.max(0, ball.gravityScaleDelay) : 0;
+          const delayedGravityActive = (ball.age || 0) >= gravityScaleDelay;
+          const baseGravityScale = Number.isFinite(ball.gravityScale) ? Math.max(0, ball.gravityScale) : 1;
+          const gravityScale = delayedGravityActive && Number.isFinite(ball.lateGravityScale)
+            ? Math.max(0, ball.lateGravityScale)
+            : baseGravityScale;
+          const baseUpwardGravityScale = Number.isFinite(ball.upwardGravityScale) ? Math.max(gravityScale, ball.upwardGravityScale) : gravityScale;
+          const upwardGravityScale = delayedGravityActive && Number.isFinite(ball.lateUpwardGravityScale)
+            ? Math.max(gravityScale, ball.lateUpwardGravityScale)
+            : baseUpwardGravityScale;
+          const effectiveGravityScale = (ball.vy || 0) < 0 ? upwardGravityScale : gravityScale;
+          ball.vy += this.gravity * effectiveGravityScale * subDt;
+          const dampingDelay = Number.isFinite(ball.linearDampingDelay) ? Math.max(0, ball.linearDampingDelay) : 0;
+          const dampingActive = (ball.age || 0) >= dampingDelay;
+          const linearDamping = dampingActive && Number.isFinite(ball.linearDamping) ? Math.max(0, ball.linearDamping) : 0;
+          const totalFriction = this.friction + linearDamping;
+          if (totalFriction > 0) {
+            const f = Math.max(0, 1 - totalFriction * subDt);
             ball.vx *= f;
             ball.vy *= f;
           }
@@ -1080,6 +1107,9 @@ class Physics {
           for (const s of structures) {
             this._collideBallWithStructure(ball, s, subTime, subState);
           }
+
+          this._consumeTouchedSpikes(ball, structures, state);
+          if (!ball.alive || ball._escaped) break;
 
           let gapHandled = false;
           for (const s of structures) {
@@ -1150,10 +1180,15 @@ class Physics {
           }
           continue;
         }
+
+        if (this._maybeRemoveOnUpturnAfterDrop(ball, state)) {
+          continue;
+        }
       }
 
       if (ball.lifetime > 0 && ball.age >= ball.lifetime) {
         ball.alive = false;
+        if (ball.clearTrailOnDeath && ball._trail) ball._trail.length = 0;
         this.events.push({
           type: 'destroy', x: ball.x, y: ball.y, color: ball.color,
           destroySound: ball.destroySound || '',
@@ -1408,7 +1443,18 @@ class Physics {
     const thetaX = (Math.PI * 2) * harmonicX * (t / L) + (ball.orbitPhase || 0);
     const prevX = ball.x, prevY = ball.y;
 
-    if (ball.motion === 'lissajous') {
+    if (ball.motion === 'spiralPath') {
+      const progress = Math.max(0, Math.min(1, t / L));
+      const startR = Number.isFinite(ball.spiralStartRadius) ? ball.spiralStartRadius : (ball.orbitRadius || 420);
+      const endR = Number.isFinite(ball.spiralEndRadius) ? ball.spiralEndRadius : 60;
+      const turns = Number.isFinite(ball.spiralTurns) ? ball.spiralTurns : (ball.orbitHarmonic || 3);
+      const radiusEase = Math.pow(progress, Number.isFinite(ball.spiralEase) ? ball.spiralEase : 0.52);
+      const angleEase = Math.pow(progress, Number.isFinite(ball.spiralAngleEase) ? ball.spiralAngleEase : 0.9);
+      const theta = (Math.PI * 2) * turns * angleEase * (ball.orbitDirection || 1) + (ball.orbitPhase || 0);
+      const r = startR + (endR - startR) * radiusEase;
+      ball.x = (ball.orbitCx || 540) + r * Math.cos(theta);
+      ball.y = (ball.orbitCy || 960) + r * Math.sin(theta);
+    } else if (ball.motion === 'lissajous') {
       const harmonicY = (ball.lissaHarmonicY || 1) * (ball.orbitDirection || 1);
       const thetaY = (Math.PI * 2) * harmonicY * (t / L) + (ball.lissaPhaseY || 0);
       ball.x = (ball.orbitCx || 540) + (ball.orbitRadius || 280) * Math.cos(thetaX);
@@ -1420,6 +1466,352 @@ class Physics {
     // Tangent velocity (used only by trail/collision-aware visuals).
     ball.vx = (ball.x - prevX) / Math.max(1e-6, dt);
     ball.vy = (ball.y - prevY) / Math.max(1e-6, dt);
+  }
+
+  _consumeTouchedSpikes(ball, structures, state = null) {
+    if (!ball || !ball.consumeSpikesOnTouch || !Array.isArray(structures)) return;
+    if (ball._heartCapReached) return;
+    const consumeRadius = Math.max(1, Number(ball.consumeRadius) || (ball.radius || 18) + 18);
+    const maxPerTick = Math.max(1, ball.consumeMaxPerTick != null ? (ball.consumeMaxPerTick | 0) : 2);
+    const minHeartIndex = Number.isFinite(ball.consumeFromHeartIndex) ? Math.max(0, ball.consumeFromHeartIndex | 0) : 0;
+    const maxHeartIndex = Number.isFinite(ball.consumeUntilHeartIndex) ? Math.max(0, ball.consumeUntilHeartIndex | 0) : Infinity;
+    const removeAfterCap = Number.isFinite(maxHeartIndex) && ball.removeAfterHeartCap === true;
+    const prevX = Number.isFinite(ball._consumePrevX) ? ball._consumePrevX : (Number.isFinite(ball._prevX) ? ball._prevX : (ball.x || 0));
+    const prevY = Number.isFinite(ball._consumePrevY) ? ball._consumePrevY : (Number.isFinite(ball._prevY) ? ball._prevY : (ball.y || 0));
+    const currX = ball.x || 0;
+    const currY = ball.y || 0;
+    const finalizeConsumeSweep = () => {
+      ball._consumePrevX = currX;
+      ball._consumePrevY = currY;
+    };
+    const touchedDuringSweep = (x, y, radius) =>
+      Math.hypot(currX - x, currY - y) <= radius ||
+      segmentDistance(x, y, prevX, prevY, currX, currY) <= radius;
+    const removeBallAtCap = () => {
+      if (!removeAfterCap || !ball.alive) return;
+      const startY = Number.isFinite(ball._dropStartY)
+        ? ball._dropStartY
+        : (Number.isFinite(ball.spawnY) ? ball.spawnY : (ball.y || 0));
+      const maxY = Number.isFinite(ball._dropMaxY) ? ball._dropMaxY : (ball.y || 0);
+      const minDrop = Math.max(0, Number.isFinite(ball.removeAfterDropMinDy) ? ball.removeAfterDropMinDy : 120);
+      if (maxY - startY < minDrop) return;
+      ball.alive = false;
+      if (ball.clearTrailOnDeath && ball._trail) ball._trail.length = 0;
+      this.events.push({
+        type: 'destroy',
+        x: ball.x,
+        y: ball.y,
+        color: ball.color,
+        destroySound: ball.destroySound || '',
+      });
+    };
+    let consumed = 0;
+    for (const sp of structures) {
+      if (!sp || sp.type !== 'spikes' || !sp.consumable) continue;
+      const count = Math.max(0, sp.count | 0);
+      if (!count) continue;
+      if (!sp._eatenSpikes || typeof sp._eatenSpikes !== 'object') sp._eatenSpikes = {};
+      if (sp.markerPath === 'spiral') {
+        const turns = Math.max(0.25, Number(sp.turns) || 4);
+        const inner = Number.isFinite(sp.innerRadius) ? sp.innerRadius : 60;
+        const outer = Number.isFinite(sp.outerRadius) ? sp.outerRadius : 430;
+        const startAngle = Number.isFinite(sp.startAngle) ? sp.startAngle : 0;
+        const direction = sp.direction === -1 ? -1 : 1;
+        const pathStartT = Math.max(0, Math.min(1, Number.isFinite(sp.markerStartT) ? sp.markerStartT : 0));
+        const pathEndT = Math.max(pathStartT, Math.min(1, Number.isFinite(sp.markerEndT) ? sp.markerEndT : 1));
+        for (let i = 0; i < count; i++) {
+          if (i < minHeartIndex) continue;
+          if (i > maxHeartIndex) continue;
+          if (sp._eatenSpikes[i]) continue;
+          const t = count <= 1 ? 0 : i / (count - 1);
+          const pathT = pathStartT + (pathEndT - pathStartT) * t;
+          const a = startAngle + direction * (Math.PI * 2) * turns * pathT;
+          const r = outer + (inner - outer) * pathT + (sp.radialOffset || 0);
+          const x = (sp.x || 0) + Math.cos(a) * r;
+          const y = (sp.y || 0) + Math.sin(a) * r;
+          const heartRadius = Math.max(0, (Number(sp.heartSize) || sp.length || 0) * 0.5);
+          const touchRadius = Math.max(consumeRadius, (ball.radius || 0) + heartRadius);
+          if (!touchedDuringSweep(x, y, touchRadius)) continue;
+          if (this._heartPickupBlockedByWall(currX, currY, x, y, structures)) {
+            this._debugHeartPickupBlocked(ball, sp, i, x, y);
+            continue;
+          }
+          const fillSmallConsumedGap = (fromIndex, toIndex) => {
+            if (!(toIndex > fromIndex + 1) || toIndex - fromIndex > 8) return;
+            for (let gapIndex = fromIndex + 1; gapIndex < toIndex; gapIndex++) {
+              if (gapIndex < minHeartIndex || gapIndex > maxHeartIndex || sp._eatenSpikes[gapIndex]) continue;
+              const gapT = count <= 1 ? 0 : gapIndex / (count - 1);
+              const gapPathT = pathStartT + (pathEndT - pathStartT) * gapT;
+              const gapA = startAngle + direction * (Math.PI * 2) * turns * gapPathT;
+              const gapR = outer + (inner - outer) * gapPathT + (sp.radialOffset || 0);
+              const gapX = (sp.x || 0) + Math.cos(gapA) * gapR;
+              const gapY = (sp.y || 0) + Math.sin(gapA) * gapR;
+              sp._eatenSpikes[gapIndex] = true;
+              ball._heartEatCount = (ball._heartEatCount || 0) + 1;
+              ball._lastHeartEatAge = ball.age || 0;
+              ball._lastHeartEatY = ball.y || 0;
+              ball._lastSpiralConsumedSpikesId = sp.id;
+              ball._lastSpiralConsumedIndex = gapIndex;
+              this._recordConsumedHeart(state, `${sp.id || 'spikes'}:${gapIndex}`);
+              this.events.push({
+                type: 'heartEat',
+                x: gapX,
+                y: gapY,
+                color: sp.color || ball.color || '#ffffff',
+                heartSound: ball.eatSound || 'pop',
+                ballId: ball.templateSourceId || ball.id || null,
+                heartIndex: gapIndex,
+                heartProgress: gapT,
+              });
+              consumed++;
+            }
+          };
+          for (let delta = 1; delta <= 8; delta++) {
+            if (sp._eatenSpikes[i - delta]) {
+              fillSmallConsumedGap(i - delta, i);
+              break;
+            }
+          }
+          for (let delta = 1; delta <= 8; delta++) {
+            if (sp._eatenSpikes[i + delta]) {
+              fillSmallConsumedGap(i, i + delta);
+              break;
+            }
+          }
+          sp._eatenSpikes[i] = true;
+          const consumeVelocityScale = Number.isFinite(ball.consumeVelocityScale)
+            ? Math.max(0, Math.min(1, ball.consumeVelocityScale))
+            : 1;
+          if (consumeVelocityScale < 1) {
+            ball.vx *= consumeVelocityScale;
+            ball.vy *= consumeVelocityScale;
+          }
+          ball._heartEatCount = (ball._heartEatCount || 0) + 1;
+          ball._lastHeartEatAge = ball.age || 0;
+          ball._lastHeartEatY = ball.y || 0;
+          ball._lastSpiralConsumedSpikesId = sp.id;
+          ball._lastSpiralConsumedIndex = i;
+          this._recordConsumedHeart(state, `${sp.id || 'spikes'}:${i}`);
+          this.events.push({
+            type: 'heartEat',
+            x,
+            y,
+            color: sp.color || ball.color || '#ffffff',
+            heartSound: ball.eatSound || 'pop',
+            ballId: ball.templateSourceId || ball.id || null,
+            heartIndex: i,
+            heartProgress: t,
+          });
+          consumed++;
+          if (i >= maxHeartIndex) {
+            ball._heartCapReached = true;
+            finalizeConsumeSweep();
+            removeBallAtCap();
+            return;
+          }
+          if (consumed >= maxPerTick) return;
+        }
+        continue;
+      }
+      const baseR = sp.radius || 0;
+      const tipR = sp.inward ? baseR - (sp.length || 0) : baseR + (sp.length || 0);
+      const biteR = (baseR + tipR) * 0.5;
+      const sector = (Math.PI * 2) / count;
+      const rotation = sp.rotation || 0;
+      for (let i = 0; i < count; i++) {
+        if (i < minHeartIndex) continue;
+        if (i > maxHeartIndex) continue;
+        if (sp._eatenSpikes[i]) continue;
+        const relAngle = i * sector;
+        if (sp.gapSize > 0 && spikeInGap(relAngle, sp.gapStart, sp.gapSize)) continue;
+        const a = rotation + relAngle;
+        const x = (sp.x || 0) + Math.cos(a) * biteR;
+        const y = (sp.y || 0) + Math.sin(a) * biteR;
+        const heartRadius = sp.markerShape === 'heart'
+          ? Math.max(0, (Number(sp.heartSize) || sp.length || 0) * 0.5)
+          : 0;
+        const touchRadius = Math.max(consumeRadius, (ball.radius || 0) + heartRadius);
+        if (!touchedDuringSweep(x, y, touchRadius)) continue;
+        sp._eatenSpikes[i] = true;
+        const consumeVelocityScale = Number.isFinite(ball.consumeVelocityScale)
+          ? Math.max(0, Math.min(1, ball.consumeVelocityScale))
+          : 1;
+        if (consumeVelocityScale < 1) {
+          ball.vx *= consumeVelocityScale;
+          ball.vy *= consumeVelocityScale;
+        }
+        ball._heartEatCount = (ball._heartEatCount || 0) + 1;
+        ball._lastHeartEatAge = ball.age || 0;
+        ball._lastHeartEatY = ball.y || 0;
+        this._recordConsumedHeart(state, `${sp.id || 'spikes'}:${i}`);
+        this.events.push({
+          type: 'heartEat',
+          x,
+          y,
+          color: sp.color || ball.color || '#ffffff',
+          heartSound: ball.eatSound || 'pop',
+          ballId: ball.templateSourceId || ball.id || null,
+          heartIndex: i,
+          heartProgress: count <= 1 ? 0 : i / (count - 1),
+        });
+        consumed++;
+        if (i >= maxHeartIndex) {
+          ball._heartCapReached = true;
+          finalizeConsumeSweep();
+          removeBallAtCap();
+          return;
+        }
+        if (consumed >= maxPerTick) return;
+      }
+    }
+    for (const heart of structures) {
+      if (!heart || !heart.consumableCenterHeart || heart._centerHeartHit) continue;
+      const unlockAfter = Math.max(0, Number.isFinite(heart.unlockAfterHearts) ? heart.unlockAfterHearts : 0);
+      if (state && (state._consumedHearts || 0) < unlockAfter) continue;
+      const allSmallConsumablesGone = structures.every((obj) => {
+        if (!obj || obj.type !== 'spikes' || !obj.consumable) return true;
+        const count = Math.max(0, obj.count | 0);
+        if (!count) return true;
+        const eaten = obj._eatenSpikes || {};
+        for (let i = 0; i < count; i++) {
+          if (!eaten[i]) return false;
+        }
+        return true;
+      });
+      if (!allSmallConsumablesGone) continue;
+      const heartRadius = Math.max(1, Number(heart.hitRadius) || (Number(heart.size) || 64) * 0.45);
+      const touchRadius = (ball.radius || 0) + heartRadius;
+      if (!touchedDuringSweep(heart.x || 0, heart.y || 0, touchRadius)) continue;
+      heart._centerHeartHit = true;
+      if (state) {
+        this._recordConsumedHeart(state, `center:${heart.id || 'heart'}`);
+        state._centerHeartHit = true;
+      }
+      this.events.push({
+        type: 'heartEat',
+        x: heart.x || 0,
+        y: heart.y || 0,
+        color: heart.color || ball.color || '#ffffff',
+        heartSound: ball.eatSound || 'pop',
+        ballId: ball.templateSourceId || ball.id || null,
+        heartIndex: unlockAfter,
+        heartProgress: 1,
+        centerHeart: true,
+      });
+      finalizeConsumeSweep();
+      return;
+    }
+    finalizeConsumeSweep();
+  }
+
+  _recordConsumedHeart(state, key) {
+    if (!state) return false;
+    const id = String(key || 'heart');
+    if (!state._consumedHeartIds || typeof state._consumedHeartIds !== 'object') state._consumedHeartIds = {};
+    if (state._consumedHeartIds[id]) return false;
+    state._consumedHeartIds[id] = true;
+    state._consumedHearts = (state._consumedHearts || 0) + 1;
+    return true;
+  }
+
+  _heartPickupBlockedByWall(ballX, ballY, heartX, heartY, structures) {
+    if (!Array.isArray(structures)) return false;
+    for (const wall of structures) {
+      if (!wall || wall.type !== 'spiral' || !wall.continuous) continue;
+      const turns = Math.max(0.25, Number(wall.turns) || 4);
+      const samples = Math.max(80, wall.samples | 0 || Math.round(turns * 96));
+      const inner = Number.isFinite(wall.innerRadius) ? wall.innerRadius : 60;
+      const outer = Number.isFinite(wall.outerRadius) ? wall.outerRadius : 430;
+      const startAngle = Number.isFinite(wall.startAngle) ? wall.startAngle : 0;
+      const direction = wall.direction === -1 ? -1 : 1;
+      const blockRadius = Math.max(1, (Number(wall.thickness) || 4) * 0.5 + 2);
+      let prev = null;
+      for (let i = 0; i <= samples; i++) {
+        const t = i / samples;
+        const a = startAngle + direction * (Math.PI * 2) * turns * t;
+        const r = outer + (inner - outer) * t;
+        const p = {
+          x: (wall.x || 0) + Math.cos(a) * r,
+          y: (wall.y || 0) + Math.sin(a) * r,
+        };
+        if (prev) {
+          const closest = closestPointsBetweenSegments(ballX, ballY, heartX, heartY, prev.x, prev.y, p.x, p.y);
+          const d = Math.hypot(closest.px - closest.qx, closest.py - closest.qy);
+          if (d <= blockRadius && closest.sc > 0.06 && closest.sc < 0.94) return true;
+        }
+        prev = p;
+      }
+    }
+    return false;
+  }
+
+  _debugHeartPickupBlocked(ball, sp, heartIndex, x, y) {
+    if (typeof window === 'undefined' || !window.__heartPickupDebug) return;
+    const entry = {
+      ballId: ball && (ball.templateSourceId || ball.id),
+      spikesId: sp && sp.id,
+      heartIndex,
+      ballX: Number(((ball && ball.x) || 0).toFixed(2)),
+      ballY: Number(((ball && ball.y) || 0).toFixed(2)),
+      heartX: Number((x || 0).toFixed(2)),
+      heartY: Number((y || 0).toFixed(2)),
+    };
+    if (!Array.isArray(window.__heartPickupDebugLogs)) window.__heartPickupDebugLogs = [];
+    window.__heartPickupDebugLogs.push(entry);
+    if (window.__heartPickupDebugLogs.length > 200) window.__heartPickupDebugLogs.shift();
+    if (window.__heartPickupDebug === 'console') console.info('[heart-pickup-blocked]', entry);
+  }
+
+  _maybeRemoveOnUpturnAfterDrop(ball, state = null) {
+    if (!ball || !ball.removeOnUpturnAfterDrop || !ball.alive || ball._escaped || ball._frozen || ball.fixed) return false;
+    const startY = Number.isFinite(ball._dropStartY)
+      ? ball._dropStartY
+      : (Number.isFinite(ball.spawnY) ? ball.spawnY : (ball.y || 0));
+    ball._dropStartY = startY;
+    const maxY = Math.max(Number.isFinite(ball._dropMaxY) ? ball._dropMaxY : startY, ball.y || 0);
+    ball._dropMaxY = maxY;
+    const minDrop = Math.max(0, Number.isFinite(ball.removeAfterDropMinDy) ? ball.removeAfterDropMinDy : 120);
+    const upturnVy = Number.isFinite(ball.removeOnUpturnVy) ? ball.removeOnUpturnVy : -40;
+    const minAge = Math.max(0, Number.isFinite(ball.removeOnUpturnMinAge) ? ball.removeOnUpturnMinAge : 0.25);
+    if ((ball.age || 0) < minAge) return false;
+    const minHearts = Math.max(0, ball.removeOnUpturnMinHearts != null ? (ball.removeOnUpturnMinHearts | 0) : 1);
+    if ((ball._heartEatCount || 0) < minHearts) return false;
+    if (maxY - startY < minDrop) return false;
+    const staleAfter = Math.max(0, Number.isFinite(ball.removeOnUpturnStaleAfter) ? ball.removeOnUpturnStaleAfter : 0.45);
+    const lastEatAge = Number.isFinite(ball._lastHeartEatAge) ? ball._lastHeartEatAge : 0;
+    if ((ball.age || 0) - lastEatAge < staleAfter) return false;
+    const lastEatY = Number.isFinite(ball._lastHeartEatY) ? ball._lastHeartEatY : startY;
+    const noProgressDy = Math.max(0, Number.isFinite(ball.removeOnUpturnNoProgressDy) ? ball.removeOnUpturnNoProgressDy : 36);
+    if (maxY - lastEatY < noProgressDy) return false;
+    const stallAfter = Number.isFinite(ball.removeWhenStalledAfter) ? Math.max(0, ball.removeWhenStalledAfter) : 0;
+    if (stallAfter > 0 && (ball.age || 0) - lastEatAge >= stallAfter) {
+      const stallSpeed = Math.max(0, Number.isFinite(ball.removeWhenStalledSpeed) ? ball.removeWhenStalledSpeed : 18);
+      if (Math.hypot(ball.vx || 0, ball.vy || 0) <= stallSpeed) {
+        ball.alive = false;
+        if (ball.clearTrailOnDeath && ball._trail) ball._trail.length = 0;
+        this.events.push({
+          type: 'destroy',
+          x: ball.x,
+          y: ball.y,
+          color: ball.color,
+          destroySound: ball.destroySound || '',
+        });
+        return true;
+      }
+    }
+    const capStaleMultiplier = Number.isFinite(ball.removeOnHeartCapStaleMultiplier) ? Math.max(1, ball.removeOnHeartCapStaleMultiplier) : 3;
+    const capStaleEnough = !!ball._heartCapReached && (ball.age || 0) - lastEatAge >= staleAfter * capStaleMultiplier;
+    if ((ball.vy || 0) >= upturnVy && !capStaleEnough) return false;
+    ball.alive = false;
+    if (ball.clearTrailOnDeath && ball._trail) ball._trail.length = 0;
+    this.events.push({
+      type: 'destroy',
+      x: ball.x,
+      y: ball.y,
+      color: ball.color,
+      destroySound: ball.destroySound || '',
+    });
+    return true;
   }
 
   _stepSpawner(sp, state, dt) {
@@ -1814,6 +2206,18 @@ class Physics {
         nx /= dist;
         ny /= dist;
       }
+      if (sp.oneWayNormal) {
+        const blockNx = Number(sp.oneWayNormal.x || 0);
+        const blockNy = Number(sp.oneWayNormal.y || 0);
+        const blockLen = Math.hypot(blockNx, blockNy);
+        if (blockLen > 1e-6) {
+          const sideDot = nx * (blockNx / blockLen) + ny * (blockNy / blockLen);
+          if (sideDot < 0.2) {
+            ball._spinnerContact[key] = false;
+            continue;
+          }
+        }
+      }
       const push = limit - dist;
       ball.x += nx * push;
       ball.y += ny * push;
@@ -2044,6 +2448,12 @@ class Physics {
   _afterWallBounce(ball, nx, ny) {
     this._curveBounce(ball, nx, ny);
     this._scatterWallBounce(ball, nx, ny);
+    const wallEnergyLoss = Math.max(0, Math.min(0.95, Number(ball.wallEnergyLoss) || 0));
+    if (wallEnergyLoss > 0) {
+      const scale = 1 - wallEnergyLoss;
+      ball.vx *= scale;
+      ball.vy *= scale;
+    }
     this._clampBallSpeed(ball);
   }
 
@@ -2788,6 +3198,65 @@ class Physics {
   }
 
   _collideSpiral(ball, sp, state = null) {
+    if (sp.continuous) {
+      const turns = Math.max(0.25, Number(sp.turns) || 4);
+      const samples = Math.max(80, sp.samples | 0 || Math.round(turns * 96));
+      const inner = Number.isFinite(sp.innerRadius) ? sp.innerRadius : 60;
+      const outer = Number.isFinite(sp.outerRadius) ? sp.outerRadius : 430;
+      const startAngle = Number.isFinite(sp.startAngle) ? sp.startAngle : 0;
+      const direction = sp.direction === -1 ? -1 : 1;
+      const radius = Math.max(1, (sp.thickness || 8) * 0.5 + (ball.radius || 0));
+      let prev = null;
+      let nearest = null;
+      for (let i = 0; i <= samples; i++) {
+        const t = i / samples;
+        const a = startAngle + direction * (Math.PI * 2) * turns * t;
+        const r = outer + (inner - outer) * t;
+        const p = { x: (sp.x || 0) + Math.cos(a) * r, y: (sp.y || 0) + Math.sin(a) * r };
+        if (prev) {
+          const vx = p.x - prev.x;
+          const vy = p.y - prev.y;
+          const len2 = vx * vx + vy * vy || 1;
+          const u = Math.max(0, Math.min(1, (((ball.x || 0) - prev.x) * vx + ((ball.y || 0) - prev.y) * vy) / len2));
+          const x = prev.x + vx * u;
+          const y = prev.y + vy * u;
+          const d = Math.hypot((ball.x || 0) - x, (ball.y || 0) - y);
+          if (!nearest || d < nearest.d) nearest = { d, x, y };
+        }
+        prev = p;
+      }
+      if (!nearest || nearest.d >= radius) return false;
+      const nx = ((ball.x || 0) - nearest.x) / Math.max(1e-6, nearest.d);
+      const ny = ((ball.y || 0) - nearest.y) / Math.max(1e-6, nearest.d);
+      const push = radius - nearest.d;
+      ball.x += nx * push;
+      ball.y += ny * push;
+      const impactSpeed = Math.abs((ball.vx || 0) * nx + (ball.vy || 0) * ny);
+      this._reflect(ball, nx, ny, ball.bounce);
+      this._afterWallBounce(ball, nx, ny);
+      this._applySoftBodyImpact(ball, nx, ny, impactSpeed);
+      this.events.push({
+        type: 'bounce',
+        source: 'spiral',
+        x: ball.x,
+        y: ball.y,
+        color: ball.color,
+        ballId: ball.id,
+        colliderId: sp.id,
+        colliderType: 'spiral',
+        bounceSound: ball.bounceSound || '',
+        bounceSoundOn: ball.bounceSoundOn || 'all',
+      });
+      if (state) {
+        this._maybeCreateCollisionHole(ball, sp, 'spiral', state, {
+          anchorX: nearest.x,
+          anchorY: nearest.y,
+          incomingVx: ball.vx || 0,
+          incomingVy: ball.vy || 0,
+        });
+      }
+      return true;
+    }
     // Match the renderer exactly: each spiral layer is a visible arc, not a
     // full hidden ring. The previous fake-circle approach created invisible
     // collision walls across the gap, which is why balls appeared to bounce on
@@ -2813,6 +3282,7 @@ class Physics {
   }
 
   _collideSpikes(ball, sp, state = null) {
+    if (sp.markerPath === 'spiral') return false;
     const dx = ball.x - sp.x;
     const dy = ball.y - sp.y;
     const dist = Math.hypot(dx, dy);

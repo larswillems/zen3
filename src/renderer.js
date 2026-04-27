@@ -629,6 +629,7 @@ class Renderer {
   handleEvents(events) {
     for (const ev of events) {
       if (ev.type === 'bounce') this.addParticle(ev.x, ev.y, ev.color, 4);
+      else if (ev.type === 'heartEat') this.addParticle(ev.x, ev.y, ev.color || '#ffffff', 5);
       else if (ev.type === 'collisionHole') this.addParticle(ev.x, ev.y, ev.color || '#ffffff', 10);
       else if (ev.type === 'destroy') this._emitGapParticles(ev);
       else if (ev.type === 'escape') this.addParticle(ev.x, ev.y, ev.color, 12);
@@ -719,6 +720,8 @@ class Renderer {
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, W, H);
 
+    this._drawAmbientParticles(visuals, state);
+
     // Draw non-ball structures first.
     for (const o of state.objects) {
       if (o._gapRemoved) continue;
@@ -746,7 +749,8 @@ class Renderer {
 
     // Text objects sit on top of scene objects but below FX overlays.
     for (const o of state.objects) {
-      if (o.type === 'text') this._drawText(o);
+      if (o.consumableCenterHeart && (o._centerHeartHit || state._centerHeartHit)) continue;
+      if (o.type === 'text') this._drawText(o, state);
       else if (o.type === 'timer') this._drawTimer(o, state);
     }
 
@@ -969,19 +973,35 @@ class Renderer {
     ctx.fill();
   }
 
-  _drawText(t) {
+  _resolveTextTemplate(text, t, state) {
+    return String(text || '').replace(/\{progressPercent\}/g, () => {
+      if (t.progressMode === 'consumedHearts') {
+        const consumed = Math.max(0, state && Number.isFinite(state._consumedHearts) ? state._consumedHearts : 0);
+        const target = Math.max(1, Number(t.progressTarget) || (state && Number(state._consumedHeartTarget)) || 1);
+        return String(Math.min(100, Math.round((consumed / target) * 100)));
+      }
+      const elapsed = state && state.elapsedTime != null ? state.elapsedTime : (state && state.time) || 0;
+      const duration = Math.max(0.01, Number(t.progressDuration) || (state && state.loopDuration) || 1);
+      const start = Number.isFinite(Number(t.progressStart)) ? Number(t.progressStart) : 0;
+      const end = Number.isFinite(Number(t.progressEnd)) ? Number(t.progressEnd) : 100;
+      const pct = start + (end - start) * Math.max(0, Math.min(1, elapsed / duration));
+      return String(Math.round(pct));
+    });
+  }
+
+  _drawText(t, state = null) {
     const ctx = this.ctx;
     ctx.save();
     ctx.fillStyle = t.color || '#ffffff';
     ctx.shadowBlur = 18 * this.glow;
-    ctx.shadowColor = t.color || '#ffffff';
+    ctx.shadowColor = t.shadowColor || t.color || '#ffffff';
     ctx.textAlign = t.align || 'center';
     ctx.textBaseline = 'middle';
     const size = Math.max(12, t.size || 72);
     const weight = t.weight || '700';
     const font = t.font || 'system-ui, sans-serif';
     ctx.font = `${weight} ${size}px ${font}`;
-    const lines = String(t.text || '').split('\n');
+    const lines = this._resolveTextTemplate(t.text, t, state).split('\n');
     const lineH = size * 1.1;
     let y = t.y - ((lines.length - 1) * lineH) * 0.5;
     for (const line of lines) {
@@ -1115,6 +1135,40 @@ class Renderer {
 
   _drawSpiral(sp) {
     const ctx = this.ctx;
+    if (sp.continuous) {
+      const turns = Math.max(0.25, Number(sp.turns) || 4);
+      const samples = Math.max(80, sp.samples | 0 || Math.round(turns * 96));
+      const inner = Number.isFinite(sp.innerRadius) ? sp.innerRadius : 60;
+      const outer = Number.isFinite(sp.outerRadius) ? sp.outerRadius : 430;
+      const startAngle = Number.isFinite(sp.startAngle) ? sp.startAngle : 0;
+      const direction = sp.direction === -1 ? -1 : 1;
+      const pathStartT = Math.max(0, Math.min(1, Number.isFinite(sp.markerStartT) ? sp.markerStartT : 0));
+      const pathEndT = Math.max(pathStartT, Math.min(1, Number.isFinite(sp.markerEndT) ? sp.markerEndT : 1));
+      const colors = Array.isArray(sp.gradientColors) && sp.gradientColors.length ? sp.gradientColors : [sp.color || '#ffffff'];
+      ctx.save();
+      ctx.lineWidth = sp.thickness;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.shadowBlur = 22 * this.glow;
+      ctx.shadowColor = sp.color;
+      let prev = null;
+      for (let i = 0; i <= samples; i++) {
+        const t = i / samples;
+        const a = startAngle + direction * (Math.PI * 2) * turns * t;
+        const r = outer + (inner - outer) * t;
+        const p = { x: sp.x + Math.cos(a) * r, y: sp.y + Math.sin(a) * r };
+        if (prev) {
+          ctx.strokeStyle = this._paletteColorAt(colors, t);
+          ctx.beginPath();
+          ctx.moveTo(prev.x, prev.y);
+          ctx.lineTo(p.x, p.y);
+          ctx.stroke();
+        }
+        prev = p;
+      }
+      ctx.restore();
+      return;
+    }
     const layers = Math.max(1, sp.layers | 0);
     const step = (sp.outerRadius - sp.innerRadius) / layers;
     ctx.save();
@@ -1136,6 +1190,212 @@ class Renderer {
 
   _drawSpikes(sp) {
     const ctx = this.ctx;
+    if (sp.markerPath === 'spiral') {
+      const count = Math.max(0, sp.count | 0);
+      const turns = Math.max(0.25, Number(sp.turns) || 4);
+      const inner = Number.isFinite(sp.innerRadius) ? sp.innerRadius : 60;
+      const outer = Number.isFinite(sp.outerRadius) ? sp.outerRadius : 430;
+      const startAngle = Number.isFinite(sp.startAngle) ? sp.startAngle : 0;
+      const direction = sp.direction === -1 ? -1 : 1;
+      const pathStartT = Math.max(0, Math.min(1, Number.isFinite(sp.markerStartT) ? sp.markerStartT : 0));
+      const pathEndT = Math.max(pathStartT, Math.min(1, Number.isFinite(sp.markerEndT) ? sp.markerEndT : 1));
+      const colors = Array.isArray(sp.gradientColors) && sp.gradientColors.length ? sp.gradientColors : [sp.color || '#ffffff'];
+      ctx.save();
+      ctx.shadowBlur = 18 * this.glow;
+      ctx.shadowColor = sp.color;
+      for (let i = 0; i < count; i++) {
+        if (sp._eatenSpikes && sp._eatenSpikes[i]) continue;
+        const t = count <= 1 ? 0 : i / (count - 1);
+        const pathT = pathStartT + (pathEndT - pathStartT) * t;
+        const a = startAngle + direction * (Math.PI * 2) * turns * pathT;
+        const r = outer + (inner - outer) * pathT + (sp.radialOffset || 0);
+        const x = sp.x + Math.cos(a) * r;
+        const y = sp.y + Math.sin(a) * r;
+        ctx.fillStyle = this._paletteColorAt(colors, t);
+        if (sp.markerShape === 'heart') {
+          const size = sp.fixedHeartSize
+            ? Math.max(8, Number(sp.heartSize) || 22)
+            : Math.max(8, sp.heartSize || sp.length || 22);
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(a + Math.PI / 2);
+          ctx.beginPath();
+          const s = size / 32;
+          ctx.moveTo(0, 10 * s);
+          ctx.bezierCurveTo(-18 * s, -2 * s, -16 * s, -18 * s, -5 * s, -18 * s);
+          ctx.bezierCurveTo(0, -18 * s, 0, -13 * s, 0, -13 * s);
+          ctx.bezierCurveTo(0, -13 * s, 0, -18 * s, 5 * s, -18 * s);
+          ctx.bezierCurveTo(16 * s, -18 * s, 18 * s, -2 * s, 0, 10 * s);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        } else if (sp.markerShape === 'diamond') {
+          const size = sp.fixedHeartSize
+            ? Math.max(8, Number(sp.heartSize) || 22)
+            : Math.max(8, sp.heartSize || sp.length || 22);
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(a + Math.PI / 2);
+          ctx.beginPath();
+          ctx.moveTo(0, -size * 0.62);
+          ctx.lineTo(size * 0.46, 0);
+          ctx.lineTo(0, size * 0.62);
+          ctx.lineTo(-size * 0.46, 0);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        } else if (sp.markerShape === 'star') {
+          const size = sp.fixedHeartSize
+            ? Math.max(8, Number(sp.heartSize) || 22)
+            : Math.max(8, sp.heartSize || sp.length || 22);
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(a + Math.PI / 2);
+          ctx.beginPath();
+          const outer = size * 0.55;
+          const inner = size * 0.24;
+          for (let p = 0; p < 10; p++) {
+            const pr = p % 2 === 0 ? outer : inner;
+            const pa = -Math.PI / 2 + p * Math.PI / 5;
+            const px = Math.cos(pa) * pr;
+            const py = Math.sin(pa) * pr;
+            if (p === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        } else if (sp.markerShape === 'bolt') {
+          const size = sp.fixedHeartSize
+            ? Math.max(8, Number(sp.heartSize) || 22)
+            : Math.max(8, sp.heartSize || sp.length || 22);
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(a + Math.PI / 2);
+          ctx.beginPath();
+          ctx.moveTo(-size * 0.10, -size * 0.62);
+          ctx.lineTo(size * 0.34, -size * 0.12);
+          ctx.lineTo(size * 0.08, -size * 0.10);
+          ctx.lineTo(size * 0.22, size * 0.62);
+          ctx.lineTo(-size * 0.34, size * 0.02);
+          ctx.lineTo(-size * 0.06, 0);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        } else if (sp.markerShape === 'drop') {
+          const size = sp.fixedHeartSize
+            ? Math.max(8, Number(sp.heartSize) || 22)
+            : Math.max(8, sp.heartSize || sp.length || 22);
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(a + Math.PI / 2);
+          ctx.beginPath();
+          ctx.moveTo(0, -size * 0.64);
+          ctx.bezierCurveTo(size * 0.46, -size * 0.18, size * 0.42, size * 0.48, 0, size * 0.58);
+          ctx.bezierCurveTo(-size * 0.42, size * 0.48, -size * 0.46, -size * 0.18, 0, -size * 0.64);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        } else if (sp.markerShape === 'orb') {
+          const size = sp.fixedHeartSize
+            ? Math.max(8, Number(sp.heartSize) || 22)
+            : Math.max(8, sp.heartSize || sp.length || 22);
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(x, y, size * 0.42, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha *= 0.55;
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(x - size * 0.12, y - size * 0.14, size * 0.13, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        } else if (sp.markerShape === 'crescent') {
+          const size = sp.fixedHeartSize
+            ? Math.max(8, Number(sp.heartSize) || 22)
+            : Math.max(8, sp.heartSize || sp.length || 22);
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(x, y, size * 0.45, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalCompositeOperation = 'destination-out';
+          ctx.beginPath();
+          ctx.arc(x + size * 0.18, y - size * 0.06, size * 0.42, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.globalAlpha *= 0.5;
+          ctx.beginPath();
+          ctx.arc(x - size * 0.12, y - size * 0.12, size * 0.08, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffffff';
+          ctx.fill();
+          ctx.restore();
+        } else if (sp.markerShape === 'flower') {
+          const size = sp.fixedHeartSize
+            ? Math.max(8, Number(sp.heartSize) || 22)
+            : Math.max(8, sp.heartSize || sp.length || 22);
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(a);
+          for (let p = 0; p < 6; p++) {
+            const pa = p * Math.PI / 3;
+            ctx.beginPath();
+            ctx.ellipse(Math.cos(pa) * size * 0.22, Math.sin(pa) * size * 0.22, size * 0.16, size * 0.31, pa, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.globalAlpha *= 0.72;
+          ctx.fillStyle = '#ffffff';
+          ctx.beginPath();
+          ctx.arc(0, 0, size * 0.14, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        } else if (sp.markerShape === 'flame') {
+          const size = sp.fixedHeartSize
+            ? Math.max(8, Number(sp.heartSize) || 22)
+            : Math.max(8, sp.heartSize || sp.length || 22);
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(a + Math.PI / 2);
+          ctx.beginPath();
+          ctx.moveTo(0, -size * 0.68);
+          ctx.bezierCurveTo(size * 0.42, -size * 0.34, size * 0.48, size * 0.18, size * 0.10, size * 0.58);
+          ctx.bezierCurveTo(size * 0.02, size * 0.30, -size * 0.18, size * 0.20, -size * 0.04, -size * 0.10);
+          ctx.bezierCurveTo(-size * 0.36, size * 0.08, -size * 0.42, size * 0.42, 0, size * 0.62);
+          ctx.bezierCurveTo(-size * 0.54, size * 0.26, -size * 0.40, -size * 0.34, 0, -size * 0.68);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        } else if (sp.markerShape === 'rune') {
+          const size = sp.fixedHeartSize
+            ? Math.max(8, Number(sp.heartSize) || 22)
+            : Math.max(8, sp.heartSize || sp.length || 22);
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(a + Math.PI / 2);
+          ctx.lineWidth = Math.max(3, size * 0.16);
+          ctx.lineCap = 'round';
+          ctx.strokeStyle = ctx.fillStyle;
+          ctx.beginPath();
+          ctx.moveTo(0, -size * 0.54);
+          ctx.lineTo(0, size * 0.54);
+          ctx.moveTo(-size * 0.42, -size * 0.18);
+          ctx.lineTo(size * 0.42, -size * 0.18);
+          ctx.moveTo(-size * 0.34, size * 0.28);
+          ctx.lineTo(size * 0.34, size * 0.28);
+          ctx.stroke();
+          ctx.globalAlpha *= 0.7;
+          ctx.beginPath();
+          ctx.arc(0, 0, size * 0.12, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        } else {
+          ctx.beginPath();
+          ctx.arc(x, y, Math.max(4, sp.length || 8), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+      return;
+    }
     ctx.save();
     ctx.shadowBlur = 18 * this.glow;
     ctx.shadowColor = sp.color;
@@ -1145,6 +1405,7 @@ class Renderer {
     const halfWidthAngle = (sp.width / 2) / baseR;
     const rotation = sp.rotation || 0;
     for (let i = 0; i < sp.count; i++) {
+      if (sp._eatenSpikes && sp._eatenSpikes[i]) continue;
       const relAngle = i * sector;
       // Skip spikes whose angle falls in the ring's gap (aligned with an
       // escape gap in a parent circle).
@@ -1159,12 +1420,67 @@ class Renderer {
       const b1y = sp.y + Math.sin(a - halfWidthAngle) * baseR;
       const b2x = sp.x + Math.cos(a + halfWidthAngle) * baseR;
       const b2y = sp.y + Math.sin(a + halfWidthAngle) * baseR;
-      ctx.beginPath();
-      ctx.moveTo(tipX, tipY);
-      ctx.lineTo(b1x, b1y);
-      ctx.lineTo(b2x, b2y);
-      ctx.closePath();
-      ctx.fill();
+      if (sp.markerShape === 'heart') {
+        const cx = (tipX + b1x + b2x) / 3;
+        const cy = (tipY + b1y + b2y) / 3;
+        const size = Math.max(8, sp.heartSize || sp.length || 18);
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(a + (sp.inward ? Math.PI / 2 : -Math.PI / 2));
+        ctx.beginPath();
+        const s = size / 32;
+        ctx.moveTo(0, 10 * s);
+        ctx.bezierCurveTo(-18 * s, -2 * s, -16 * s, -18 * s, -5 * s, -18 * s);
+        ctx.bezierCurveTo(0, -18 * s, 0, -13 * s, 0, -13 * s);
+        ctx.bezierCurveTo(0, -13 * s, 0, -18 * s, 5 * s, -18 * s);
+        ctx.bezierCurveTo(16 * s, -18 * s, 18 * s, -2 * s, 0, 10 * s);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      } else if (sp.markerShape === 'diamond') {
+        const cx = (tipX + b1x + b2x) / 3;
+        const cy = (tipY + b1y + b2y) / 3;
+        const size = Math.max(8, sp.heartSize || sp.length || 18);
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(a + (sp.inward ? Math.PI / 2 : -Math.PI / 2));
+        ctx.beginPath();
+        ctx.moveTo(0, -size * 0.62);
+        ctx.lineTo(size * 0.46, 0);
+        ctx.lineTo(0, size * 0.62);
+        ctx.lineTo(-size * 0.46, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      } else if (sp.markerShape === 'star') {
+        const cx = (tipX + b1x + b2x) / 3;
+        const cy = (tipY + b1y + b2y) / 3;
+        const size = Math.max(8, sp.heartSize || sp.length || 18);
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(a + (sp.inward ? Math.PI / 2 : -Math.PI / 2));
+        ctx.beginPath();
+        const outer = size * 0.55;
+        const inner = size * 0.24;
+        for (let p = 0; p < 10; p++) {
+          const pr = p % 2 === 0 ? outer : inner;
+          const pa = -Math.PI / 2 + p * Math.PI / 5;
+          const px = Math.cos(pa) * pr;
+          const py = Math.sin(pa) * pr;
+          if (p === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(b1x, b1y);
+        ctx.lineTo(b2x, b2y);
+        ctx.closePath();
+        ctx.fill();
+      }
     }
     ctx.restore();
   }
@@ -1333,6 +1649,41 @@ class Renderer {
       const spr = this._getGlowSprite(p.color);
       const size = p.size * haloMult * glowScale;
       ctx.drawImage(spr, p.x - size / 2, p.y - size / 2, size, size);
+    }
+    ctx.restore();
+  }
+
+  _drawAmbientParticles(visuals, state) {
+    const cfg = visuals && visuals.ambientParticles;
+    if (!cfg || cfg.enabled === false) return;
+    const ctx = this.ctx;
+    const count = Math.max(0, Math.min(500, cfg.count != null ? cfg.count | 0 : 120));
+    if (!count) return;
+    const colors = Array.isArray(cfg.colors) && cfg.colors.length
+      ? cfg.colors
+      : ['#ffffff'];
+    const elapsed = state && Number.isFinite(state.elapsedTime)
+      ? state.elapsedTime
+      : ((state && Number.isFinite(state.time)) ? state.time : 0);
+    const speed = Number.isFinite(cfg.speed) ? cfg.speed : 10;
+    const size = Math.max(0.5, Number(cfg.size) || 1.4);
+    const alpha = Math.max(0, Math.min(1, Number(cfg.alpha) || 0.28));
+
+    ctx.save();
+    ctx.globalCompositeOperation = cfg.blend || 'lighter';
+    for (let i = 0; i < count; i++) {
+      const n1 = Math.sin((i + 1) * 12.9898) * 43758.5453;
+      const n2 = Math.sin((i + 1) * 78.233) * 23454.123;
+      const n3 = Math.sin((i + 1) * 39.425) * 15342.987;
+      const x = (n1 - Math.floor(n1)) * W;
+      const drift = ((n3 - Math.floor(n3)) - 0.5) * 18;
+      const y = (((n2 - Math.floor(n2)) * H) + elapsed * speed * (0.35 + ((i % 7) / 10))) % H;
+      const twinkle = 0.65 + 0.35 * Math.sin(elapsed * 1.7 + i * 0.73);
+      ctx.globalAlpha = alpha * twinkle;
+      ctx.fillStyle = colors[i % colors.length];
+      ctx.beginPath();
+      ctx.arc(x + drift * Math.sin(elapsed * 0.4 + i), y, size * (0.7 + (i % 3) * 0.18), 0, Math.PI * 2);
+      ctx.fill();
     }
     ctx.restore();
   }

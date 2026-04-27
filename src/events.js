@@ -306,6 +306,8 @@ class EventEngine {
         return s.scoreCount >= (trigger.count || 1);
       case 'scoreTotal':
         return this._prevScore < (trigger.points || 0) && score >= (trigger.points || 0);
+      case 'consumedHearts':
+        return (state && (state._consumedHearts || 0)) >= Math.max(1, trigger.count || 1);
       case 'allGone':
         // Fire only after we've had balls alive at some point.
         if (this._prevAlive > 0 && alive === 0) return true;
@@ -518,12 +520,22 @@ class EventEngine {
         if (action.maxSpawns != null && (state._spawnSeq || 0) >= Math.max(0, action.maxSpawns | 0)) {
           break;
         }
+        if (action.resetConsumablesOnSpawn) {
+          for (const obj of state.objects || []) {
+            if (obj && obj.type === 'spikes' && obj.consumable) obj._eatenSpikes = {};
+          }
+        }
         state._spawnSeq = (state._spawnSeq || 0) + 1;
 
         let tpl = null;
-        if (action.templateId && sim.scenario && Array.isArray(sim.scenario.objects)) {
+        let templateId = action.templateId;
+        if (Array.isArray(action.templateIds) && action.templateIds.length) {
+          const idx = Math.max(0, Math.min(action.templateIds.length - 1, (state._spawnSeq || 1) - 1));
+          templateId = action.templateIds[idx];
+        }
+        if (templateId && sim.scenario && Array.isArray(sim.scenario.objects)) {
           tpl = sim.scenario.objects.find(
-            (o) => o.type === 'ball' && o.id === action.templateId
+            (o) => o.type === 'ball' && o.id === templateId
           );
         }
 
@@ -537,11 +549,20 @@ class EventEngine {
         const trailLength    = pick('trailLength', 60);
         const clearTrailOnDeath = pick('clearTrailOnDeath', true);
         const randomInitDir  = pick('randomInitDir', false);
+        const gravityScale   = pick('gravityScale', 1);
+        const upwardGravityScale = pick('upwardGravityScale', null);
+        const gravityScaleDelay = pick('gravityScaleDelay', 0);
+        const lateGravityScale = pick('lateGravityScale', null);
+        const lateUpwardGravityScale = pick('lateUpwardGravityScale', null);
+        const linearDamping  = pick('linearDamping', 0);
+        const linearDampingDelay = pick('linearDampingDelay', 0);
         const bounce         = pick('bounce', 1.0);
         const wallCurve      = pick('wallCurve', 0);
         const wallDrift      = pick('wallDrift', 0);
+        const wallEnergyLoss = pick('wallEnergyLoss', 0);
         const wallBounceAngleRange = pick('wallBounceAngleRange', 0);
         const collisionSpread = pick('collisionSpread', 0.35);
+        const maxSpeed       = pick('maxSpeed', 0);
         const softBody       = pick('softBody', false);
         const elasticity     = pick('elasticity', 0.35);
         const recoverySpeed  = pick('recoverySpeed', 7.0);
@@ -570,6 +591,23 @@ class EventEngine {
         const collisionHoleOnFixedBall = pick('collisionHoleOnFixedBall', false);
         const destroyOnSpike = pick('destroyOnSpike', false);
         const freezeOnSpike  = pick('freezeOnSpike', true);
+        const consumeSpikesOnTouch = pick('consumeSpikesOnTouch', false);
+        const consumeRadius = pick('consumeRadius', 0);
+        const consumeMaxPerTick = pick('consumeMaxPerTick', 0);
+        const consumeVelocityScale = pick('consumeVelocityScale', 1);
+        const consumeFromHeartIndex = pick('consumeFromHeartIndex', null);
+        const consumeUntilHeartIndex = pick('consumeUntilHeartIndex', null);
+        const removeAfterHeartCap = pick('removeAfterHeartCap', true);
+        const eatSound = pick('eatSound', '');
+        const removeOnUpturnAfterDrop = pick('removeOnUpturnAfterDrop', false);
+        const removeAfterDropMinDy = pick('removeAfterDropMinDy', 120);
+        const removeOnUpturnVy = pick('removeOnUpturnVy', -40);
+        const removeOnUpturnMinAge = pick('removeOnUpturnMinAge', 0.25);
+        const removeOnUpturnStaleAfter = pick('removeOnUpturnStaleAfter', 0.45);
+        const removeOnUpturnNoProgressDy = pick('removeOnUpturnNoProgressDy', 36);
+        const removeOnUpturnMinHearts = pick('removeOnUpturnMinHearts', 1);
+        const removeWhenStalledAfter = pick('removeWhenStalledAfter', 0);
+        const removeWhenStalledSpeed = pick('removeWhenStalledSpeed', 18);
 
         // Template-ball spawns should follow the template ball's current
         // authored position. That lets the user move the template in the
@@ -598,6 +636,13 @@ class EventEngine {
         const baseVx = vx0 + (jitter && sim.rng ? sim.rng.range(-jitter, jitter) : 0);
         let vx = baseVx;
         let spawnVy = vy;
+        if (action.vxStepPerSpawn != null) vx += (state._spawnSeq || 0) * Number(action.vxStepPerSpawn);
+        if (action.vyStepPerSpawn != null) spawnVy += (state._spawnSeq || 0) * Number(action.vyStepPerSpawn);
+        if (action.speedScalePerSpawn != null) {
+          const scale = 1 + Math.max(0, state._spawnSeq || 0) * Number(action.speedScalePerSpawn);
+          vx *= scale;
+          spawnVy *= scale;
+        }
         if (randomInitDir && sim.rng) {
           const speed = Math.hypot(baseVx || 0, vy || 0);
           if (speed > 1e-6) {
@@ -609,10 +654,13 @@ class EventEngine {
         state.objects.push({
           id: `spawn_${state._spawnSeq}`,
           type: 'ball',
+          templateSourceId: templateId || '',
           x, y, vx, vy: spawnVy,
           radius, color: spawnColor,
-          trail, trailLength, clearTrailOnDeath, randomInitDir,
-          lifetime, freezeOnTimeout, bounce, wallCurve, wallDrift, wallBounceAngleRange, collisionSpread,
+          trail, trailLength, clearTrailOnDeath, randomInitDir, gravityScale, upwardGravityScale,
+          gravityScaleDelay, lateGravityScale, lateUpwardGravityScale, linearDamping, linearDampingDelay,
+          lifetime, freezeOnTimeout, bounce, wallCurve, wallDrift, wallEnergyLoss, wallBounceAngleRange, collisionSpread,
+          maxSpeed,
           softBody, elasticity, recoverySpeed, wobbleIntensity, wobbleDamping,
           changeColorOnBallCollision,
           deadColor, recolorOnFreeze, deathBurstOnFreeze,
@@ -621,6 +669,10 @@ class EventEngine {
           collisionHoleOnCircle, collisionHoleOnArc, collisionHoleOnSpikes,
           collisionHoleOnSpinner, collisionHoleOnBall, collisionHoleOnFixedBall,
           destroyOnSpike, freezeOnSpike,
+          consumeSpikesOnTouch, consumeRadius, consumeMaxPerTick, consumeVelocityScale, consumeFromHeartIndex, consumeUntilHeartIndex, removeAfterHeartCap, eatSound,
+          removeOnUpturnAfterDrop, removeAfterDropMinDy, removeOnUpturnVy, removeOnUpturnMinAge,
+          removeOnUpturnStaleAfter, removeOnUpturnNoProgressDy, removeOnUpturnMinHearts,
+          removeWhenStalledAfter, removeWhenStalledSpeed,
           alive: true, age: 0,
           motion: 'physics',
           orbitCx: 540, orbitCy: 960, orbitRadius: 280,

@@ -153,10 +153,11 @@ class App {
         }
         const ec = this.simulator.scenario.endCondition || null;
         const activeBalls = this._activeBallCount();
-        if (evs.some((e) => e.type === 'finish')) {
+        const finished = !!(this.simulator.state && this.simulator.state._finished);
+        if (finished || evs.some((e) => e.type === 'finish')) {
           this._logFinishDebug({
             phase: 'runtime-stop',
-            reason: 'finish',
+            reason: finished ? 'finishedState' : 'finish',
             seed: this.simulator.scenario.seed,
             scenarioName: this.simulator.scenario.name || '',
             elapsed: Number((this.simulator.state.elapsedTime != null ? this.simulator.state.elapsedTime : this.simulator.state.time).toFixed(3)),

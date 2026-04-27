@@ -175,6 +175,10 @@ class UI {
     if (randomColorsBtn) {
       randomColorsBtn.addEventListener('click', () => this._applyRandomColorCombo());
     }
+    const brightColorsBtn = document.getElementById('btn-bright-colors');
+    if (brightColorsBtn) {
+      brightColorsBtn.addEventListener('click', () => this._applyRandomColorCombo(this._randomBrightColorCombos()));
+    }
 
     // Top bar controls.
     document.getElementById('btn-start').addEventListener('click', () => {
@@ -282,7 +286,7 @@ class UI {
     if (seedResultsSort) {
       seedResultsSort.addEventListener('change', () => {
         this._seedResultsSortKey = String(seedResultsSort.value || 'match');
-        this._setSeedResults(this._seedResults);
+        this._setSeedResults(this._seedResults, null, { preserveSelection: false });
         this._refreshSeedResultsUI();
       });
     }
@@ -366,6 +370,10 @@ class UI {
       this.refreshAll();
       this._commit();
     });
+    const testDeterminationBtn = document.getElementById('btn-test-determination');
+    if (testDeterminationBtn) {
+      testDeterminationBtn.addEventListener('click', () => this._testDeterminationAttempts());
+    }
 
     const branchMazeRotation = document.getElementById('branch-maze-rotation');
     const branchMazeRotationLabel = document.getElementById('branch-maze-rotation-label');
@@ -509,6 +517,14 @@ class UI {
       this.refreshAll();
       this._commit();
     });
+    document.getElementById('preset-timed2').addEventListener('click', () => {
+      this._activePresetId = 'timed2';
+      this.app.simulator.setScenario(buildTwoSecEscapeScenario());
+      this._afterScenarioSwitch();
+      this.select(null);
+      this.refreshAll();
+      this._commit();
+    });
     document.getElementById('preset-timed3').addEventListener('click', () => {
       this._activePresetId = 'timed3';
       this.app.simulator.setScenario(buildThreeSecEscapeScenario());
@@ -592,6 +608,86 @@ class UI {
     document.getElementById('preset-legend-spikes').addEventListener('click', () => {
       this._activePresetId = 'legend-spikes';
       this.app.simulator.setScenario(buildLegendSpikesScenario(this.app.simulator.scenario.seed));
+      this._afterScenarioSwitch();
+      this.select(null);
+      this.refreshAll();
+      this._commit();
+    });
+    document.getElementById('preset-determination').addEventListener('click', () => {
+      this._activePresetId = 'determination';
+      this.app.simulator.setScenario(buildDeterminationSpiralScenario(this.app.simulator.scenario.seed));
+      this._afterScenarioSwitch();
+      this.select(null);
+      this.refreshAll();
+      this._commit();
+    });
+    document.getElementById('preset-crystal-spiral').addEventListener('click', () => {
+      this._activePresetId = 'crystal-spiral';
+      this.app.simulator.setScenario(buildCrystalSpiralScenario(this.app.simulator.scenario.seed));
+      this._afterScenarioSwitch();
+      this.select(null);
+      this.refreshAll();
+      this._commit();
+    });
+    document.getElementById('preset-starlight-spiral').addEventListener('click', () => {
+      this._activePresetId = 'starlight-spiral';
+      this.app.simulator.setScenario(buildStarlightSpiralScenario(this.app.simulator.scenario.seed));
+      this._afterScenarioSwitch();
+      this.select(null);
+      this.refreshAll();
+      this._commit();
+    });
+    document.getElementById('preset-bubble-spiral').addEventListener('click', () => {
+      this._activePresetId = 'bubble-spiral';
+      this.app.simulator.setScenario(buildBubbleSpiralScenario(this.app.simulator.scenario.seed));
+      this._afterScenarioSwitch();
+      this.select(null);
+      this.refreshAll();
+      this._commit();
+    });
+    document.getElementById('preset-neon-bolt-spiral').addEventListener('click', () => {
+      this._activePresetId = 'neon-bolt-spiral';
+      this.app.simulator.setScenario(buildNeonBoltSpiralScenario(this.app.simulator.scenario.seed));
+      this._afterScenarioSwitch();
+      this.select(null);
+      this.refreshAll();
+      this._commit();
+    });
+    document.getElementById('preset-candy-drop-spiral').addEventListener('click', () => {
+      this._activePresetId = 'candy-drop-spiral';
+      this.app.simulator.setScenario(buildCandyDropSpiralScenario(this.app.simulator.scenario.seed));
+      this._afterScenarioSwitch();
+      this.select(null);
+      this.refreshAll();
+      this._commit();
+    });
+    document.getElementById('preset-moonlit-spiral').addEventListener('click', () => {
+      this._activePresetId = 'moonlit-spiral';
+      this.app.simulator.setScenario(buildMoonlitSpiralScenario(this.app.simulator.scenario.seed));
+      this._afterScenarioSwitch();
+      this.select(null);
+      this.refreshAll();
+      this._commit();
+    });
+    document.getElementById('preset-blossom-spiral').addEventListener('click', () => {
+      this._activePresetId = 'blossom-spiral';
+      this.app.simulator.setScenario(buildBlossomSpiralScenario(this.app.simulator.scenario.seed));
+      this._afterScenarioSwitch();
+      this.select(null);
+      this.refreshAll();
+      this._commit();
+    });
+    document.getElementById('preset-ember-spiral').addEventListener('click', () => {
+      this._activePresetId = 'ember-spiral';
+      this.app.simulator.setScenario(buildEmberSpiralScenario(this.app.simulator.scenario.seed));
+      this._afterScenarioSwitch();
+      this.select(null);
+      this.refreshAll();
+      this._commit();
+    });
+    document.getElementById('preset-frost-rune-spiral').addEventListener('click', () => {
+      this._activePresetId = 'frost-rune-spiral';
+      this.app.simulator.setScenario(buildFrostRuneSpiralScenario(this.app.simulator.scenario.seed));
       this._afterScenarioSwitch();
       this.select(null);
       this.refreshAll();
@@ -1211,16 +1307,29 @@ class UI {
     ];
   }
 
+  _randomBrightColorCombos() {
+    return [
+      ['#ff00b8', '#22d3ee', '#facc15', '#a78bfa', '#34d399'],
+      ['#f43f5e', '#fb923c', '#fde047', '#4ade80', '#38bdf8'],
+      ['#ec4899', '#8b5cf6', '#06b6d4', '#84cc16', '#f97316'],
+      ['#ff4d6d', '#f9a8d4', '#c084fc', '#60a5fa', '#2dd4bf'],
+      ['#e879f9', '#818cf8', '#67e8f9', '#bef264', '#fef08a'],
+      ['#f472b6', '#fb7185', '#fdba74', '#a3e635', '#22d3ee'],
+      ['#d946ef', '#6366f1', '#0ea5e9', '#10b981', '#eab308'],
+      ['#ff6bcb', '#6c63ff', '#00e5ff', '#00ff85', '#fff176'],
+    ];
+  }
+
   _randomPaletteColor(palette, index, jitter = 0) {
     if (!Array.isArray(palette) || palette.length === 0) return '#ffffff';
     const base = palette[(index + jitter) % palette.length];
     return base || '#ffffff';
   }
 
-  _applyRandomColorCombo() {
+  _applyRandomColorCombo(forcedCombos = null) {
     const sc = this.app.simulator.scenario;
     if (!sc || !Array.isArray(sc.objects) || sc.objects.length === 0) return;
-    const combos = this._randomColorCombos();
+    const combos = Array.isArray(forcedCombos) && forcedCombos.length ? forcedCombos : this._randomColorCombos();
     const palette = combos[(Math.random() * combos.length) | 0];
     let idx = 0;
     for (const obj of sc.objects) {
@@ -1307,6 +1416,7 @@ class UI {
     const clearSeedResults = options.clearSeedResults !== false;
     this._migrateLegacyScenarioFixes();
     this._normalizeTemplateSpawnRules();
+    this._refreshActivePresetButton();
     const rules = (this.app.simulator.scenario && this.app.simulator.scenario.events) || [];
     if (this.app.events) this.app.events.setRules(rules);
     if (this.app.audio) {
@@ -1319,6 +1429,22 @@ class UI {
       this._seedListMetricKey = 'ballsUsed';
       this._seedResults = [];
       this._seedResultIndex = -1;
+    }
+  }
+
+  _refreshActivePresetButton() {
+    const activeId = this._activePresetId || '';
+    const idByPreset = {
+      chaos: 'preset-escape',
+      timed4: 'preset-timed',
+      timed3: 'preset-timed3',
+      'branch-maze-tower-a': 'preset-branch-maze-tower',
+    };
+    const activeButtonId = idByPreset[activeId] || (activeId ? `preset-${activeId}` : '');
+    for (const btn of document.querySelectorAll('button.preset')) {
+      const isActive = !!activeButtonId && btn.id === activeButtonId;
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
     }
   }
 
@@ -1794,6 +1920,12 @@ class UI {
           finishTailSteps = stepLimitFor(finishTailSec);
         }
       }
+      if (finishAt < 0 && sim.state && sim.state._finished) {
+        finishAt = step;
+        finishElapsedSec = sim.state.elapsedTime != null ? sim.state.elapsedTime : sim.state.time;
+        finishTailSec = Math.max(0, Number(sim.state._finishTail) || 0);
+        finishTailSteps = stepLimitFor(finishTailSec);
+      }
 
       for (const o of sim.state.objects) {
         if (o.type === 'ball' && !o.fixed) ballIds.add(o.id);
@@ -1866,6 +1998,9 @@ class UI {
         if (ballCountAt >= 0 && (step - ballCountAt) >= tailSteps) {
           completed = true; break;
         }
+      } else if (ec.type === 'finish') {
+        // Finish-driven scenarios must wait for the finish event. Do not fall
+        // back to the short authored duration, which is often just UI loop time.
       } else if (step + 1 >= fixedSteps) {
         completed = true; break;
       }
@@ -2102,6 +2237,13 @@ class UI {
         if (!Number.isFinite(min)) min = av;
         if (!Number.isFinite(max)) max = bv;
         if (min > max) [min, max] = [max, min];
+        if (metricKey === 'endSeconds') {
+          const ad = Math.abs(av - max);
+          const bd = Math.abs(bv - max);
+          if (ad !== bd) return ad - bd;
+          if (av !== bv) return bv - av;
+          return (Number(a && a.seed) || 0) - (Number(b && b.seed) || 0);
+        }
         const targetCenter = (min + max) * 0.5;
         const ad = Math.abs(av - targetCenter);
         const bd = Math.abs(bv - targetCenter);
@@ -2129,8 +2271,11 @@ class UI {
     return `${end} | ${used} used | ${peak} | ${ballColls} | ${circleHits}`;
   }
 
-  _setSeedResults(results, preferredSeed = null) {
-    const prevSeed = preferredSeed != null ? preferredSeed : this._currentSeedResultSeed();
+  _setSeedResults(results, preferredSeed = null, options = {}) {
+    const preserveSelection = options && options.preserveSelection !== false;
+    const prevSeed = preferredSeed != null
+      ? preferredSeed
+      : (preserveSelection ? this._currentSeedResultSeed() : null);
     this._seedResults = Array.isArray(results) ? results.slice() : [];
     this._seedResults.sort((a, b) => this._compareSeedResults(a, b));
     if (this._seedResults.length === 0) {
@@ -2352,7 +2497,7 @@ class UI {
           matches.push(res);
           matches.sort((a, b) => this._compareSeedResults(a, b));
           if (matches.length > maxMatches) matches.length = maxMatches;
-          this._setSeedResults(matches);
+          this._setSeedResults(matches, null, { preserveSelection: false });
           this._refreshSeedResultsUI();
           const dbg = res.debug || {};
           this._pushSeedSearchDebug({
@@ -2408,7 +2553,7 @@ class UI {
         const scannedOffset = seed - startSeed;
         if (scannedOffset % 25 === 0) {
           if (matches.length > 0) {
-            this._setSeedResults(matches);
+            this._setSeedResults(matches, null, { preserveSelection: false });
             this._refreshSeedResultsUI();
           }
           this._pushSeedSearchDebug({
@@ -2425,7 +2570,7 @@ class UI {
 
       this._seedListNextOffset = 0;
       if (matches.length > 0 || !this._seedSearchCancelRequested) {
-        this._setSeedResults(matches);
+        this._setSeedResults(matches, null, { preserveSelection: false });
       } else {
         this._setSeedResults(previousResults, previousIndex >= 0 && previousResults[previousIndex] ? previousResults[previousIndex].seed : null);
       }
@@ -2509,6 +2654,7 @@ class UI {
     this.refreshEvents();
     this.refreshMelodyPanel();
     this._updateSatisfyingClass();
+    this._refreshActivePresetButton();
   }
 
   // --- Melody editor ------------------------------------------------------
@@ -4073,7 +4219,7 @@ class UI {
       const wrap = document.createElement('div');
       wrap.className = 'sound-field';
       input = document.createElement('select');
-      const presets = (window.SOUND_PRESETS && window.SOUND_PRESETS[field.kind]) || [];
+      const presets = this._soundOptionsForKind(field.kind);
       for (const p of presets) {
         const opt = document.createElement('option');
         opt.value = p.value;
@@ -4211,6 +4357,22 @@ class UI {
     const sc = this.app.simulator.scenario;
     if (!sc.soundAssets || typeof sc.soundAssets !== 'object') sc.soundAssets = {};
     return sc.soundAssets;
+  }
+
+  _soundOptionsForKind(kind) {
+    const options = ((window.SOUND_PRESETS && window.SOUND_PRESETS[kind]) || []).slice();
+    const used = new Set(options.map((opt) => String(opt.value)));
+    for (const [assetId, asset] of Object.entries(this._scenarioSoundAssets())) {
+      const value = `asset:${assetId}`;
+      if (used.has(value)) continue;
+      used.add(value);
+      const name = asset && (asset.name || asset.filename || asset.mime || asset.type);
+      options.push({
+        value,
+        label: `Uploaded: ${name || assetId}`,
+      });
+    }
+    return options;
   }
 
   _scanGapAssetRefs(skipObjectId = null) {
@@ -5051,6 +5213,129 @@ class UI {
   _exportVideo(kind) {
     this._enqueueExportVideo(kind, { autostart: true });
   }
+
+  async _testDeterminationAttempts() {
+    const source = this.app && this.app.simulator ? this.app.simulator.getScenario() : null;
+    if (!source || source.name !== '100% Determination') {
+      alert('Load/select the 100% Determination preset first.');
+      return;
+    }
+    const btn = document.getElementById('btn-test-determination');
+    const oldLabel = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Testing Determination...';
+    }
+    const sim = new Simulator();
+    sim.setScenario(source);
+    const noopRenderer = {
+      confettiBurst() {},
+      showPopup() {},
+      schedulePopup() {},
+      shatterObject() {},
+      triggerFlash() {},
+      addParticle() {},
+    };
+    const engine = new EventEngine({
+      simulator: sim,
+      renderer: noopRenderer,
+      audio: { playWinFanfare() {} },
+      triggerSlowmo() {},
+    });
+    engine.setRules(sim.scenario.events || []);
+
+    const waitFrame = () => new Promise((resolve) => {
+      if (window.requestAnimationFrame) window.requestAnimationFrame(resolve);
+      else window.setTimeout(() => resolve((window.performance && window.performance.now) ? window.performance.now() : Date.now()), 16);
+    });
+    const dt = window.PHYSICS_CONST && window.PHYSICS_CONST.FIXED_DT
+      ? window.PHYSICS_CONST.FIXED_DT
+      : 1 / 60;
+    const maxSeconds = Math.max(20, (sim.scenario.duration || 38.6) * 3);
+    const maxSteps = Math.ceil(maxSeconds / dt);
+    const startedAt = (window.performance && window.performance.now) ? window.performance.now() : Date.now();
+    let stepsRun = 0;
+    const attempts = new Map();
+    const ensureAttempt = (id) => {
+      const key = id || 'unknown';
+      if (!attempts.has(key)) {
+        attempts.set(key, {
+          id: key,
+          hearts: 0,
+          maxHeartIndex: -1,
+          maxProgress: 0,
+          firstAt: null,
+          lastAt: null,
+        });
+      }
+      return attempts.get(key);
+    };
+
+    const runOneStep = () => {
+      sim.step(dt);
+      stepsRun++;
+      const events = sim.lastEvents();
+      const elapsed = sim.state.elapsedTime || 0;
+      for (const ev of events) {
+        if (ev.type !== 'heartEat') continue;
+        const rec = ensureAttempt(ev.ballId);
+        rec.hearts++;
+        rec.maxHeartIndex = Math.max(rec.maxHeartIndex, Number.isFinite(ev.heartIndex) ? ev.heartIndex : -1);
+        const target = Math.max(1, sim.state && Number.isFinite(sim.state._consumedHeartTarget) ? sim.state._consumedHeartTarget : 1);
+        const consumed = sim.state && Number.isFinite(sim.state._consumedHearts) ? sim.state._consumedHearts : 0;
+        rec.maxProgress = Math.max(rec.maxProgress, consumed / target);
+        if (rec.firstAt == null) rec.firstAt = elapsed;
+        rec.lastAt = elapsed;
+      }
+      engine.update(sim.state, events);
+    };
+    const testSpeed = 1;
+    let lastFrameAt = startedAt;
+    let simulatedTarget = 0;
+    while (stepsRun < maxSteps && !(sim.state && sim.state._finished)) {
+      const frameAt = await waitFrame();
+      const frameDelta = Math.max(0, Math.min(0.1, (frameAt - lastFrameAt) / 1000));
+      lastFrameAt = frameAt;
+      simulatedTarget += frameDelta * testSpeed;
+      let stepsThisFrame = 0;
+      while ((stepsRun * dt) < simulatedTarget && stepsRun < maxSteps && stepsThisFrame < 8) {
+        runOneStep();
+        stepsThisFrame++;
+        if (sim.state && sim.state._finished) break;
+      }
+      if (btn) {
+        const consumed = sim.state && Number.isFinite(sim.state._consumedHearts) ? sim.state._consumedHearts : 0;
+        const target = Math.max(1, sim.state && Number.isFinite(sim.state._consumedHeartTarget) ? sim.state._consumedHeartTarget : 1);
+        const pct = Math.min(100, Math.round((consumed / target) * 100));
+        btn.textContent = `Testing... ${pct}% (${(stepsRun * dt).toFixed(1)}s)`;
+      }
+    }
+    const finishedAt = (window.performance && window.performance.now) ? window.performance.now() : Date.now();
+
+    const ordered = Array.from(attempts.values()).sort((a, b) => {
+      const na = Number(String(a.id).match(/(\d+)$/)?.[1] || 0);
+      const nb = Number(String(b.id).match(/(\d+)$/)?.[1] || 0);
+      return na - nb || a.id.localeCompare(b.id);
+    });
+    const total = sim.state && Number.isFinite(sim.state._consumedHearts) ? sim.state._consumedHearts : 0;
+    const lines = [
+      `Determination attempt test (${total} hearts total)`,
+      `finished: ${!!(sim.state && sim.state._finished)}`,
+      `simulated: ${(stepsRun * dt).toFixed(2)}s in ${stepsRun} steps`,
+      `real time: ${((finishedAt - startedAt) / 1000).toFixed(2)}s`,
+      '',
+      ...ordered.map((a) =>
+        `${a.id}: hearts=${a.hearts}, maxHeart=${a.maxHeartIndex}, progress=${(a.maxProgress * 100).toFixed(1)}%, first=${a.firstAt == null ? '-' : a.firstAt.toFixed(2)}s, last=${a.lastAt == null ? '-' : a.lastAt.toFixed(2)}s`
+      ),
+    ];
+    const text = lines.join('\n');
+    console.info(text);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = oldLabel || 'Test Determination attempts';
+    }
+    alert(text);
+  }
 }
 
 function propertySchema(objOrType) {
@@ -5090,7 +5375,8 @@ function propertySchema(objOrType) {
         { key: 'spawnY', label: 'Spawn Y', type: 'number', min: 0, max: 1920, step: 1 },
           { key: 'x', label: 'X', type: 'number', min: 0, max: 1080, step: 1 },
           { key: 'y', label: 'Y', type: 'number', min: 0, max: 1920, step: 1 },
-          { key: 'speed', label: 'Speed', type: 'speed', min: 0, max: 1200, step: 1 },
+          { key: 'speed', label: 'Speed', type: 'speed', min: 0, max: 6000, step: 10 },
+          { key: 'vy', label: 'Vertical speed (vy)', type: 'number', min: -6000, max: 6000, step: 10, decimals: 0 },
           { key: 'initDir', label: 'Init dir', type: 'direction', min: -180, max: 180, step: 1, decimals: 0 },
           { key: 'randomInitDir', label: 'Random init dir', type: 'bool' },
           { key: 'fixed', label: 'Static', type: 'bool' },
