@@ -5099,6 +5099,13 @@ class UI {
   }
 
   _downloadBlob(blob, filename) {
+    console.info('[export-ui] creating download link', {
+      filename,
+      blobSize: blob && blob.size,
+      blobType: blob && blob.type,
+      visibilityState: document.visibilityState,
+      userAgent: navigator.userAgent,
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -5106,12 +5113,18 @@ class UI {
     a.rel = 'noopener';
     a.style.display = 'none';
     document.body.appendChild(a);
+    console.info('[export-ui] clicking download link', { filename, urlPrefix: url.slice(0, 32) });
     a.click();
+    console.info('[export-ui] download click dispatched; check Chrome downloads if no file appears', { filename });
     // Keep the blob URL alive long enough for large exports to start saving.
     setTimeout(() => {
       if (a.isConnected) document.body.removeChild(a);
+      console.info('[export-ui] temporary download link removed', { filename });
     }, 1000);
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+      console.info('[export-ui] blob URL revoked', { filename });
+    }, 60000);
   }
 
   _getExportUi() {
@@ -5156,6 +5169,7 @@ class UI {
   _setExportStatus(message, { done, total } = {}) {
     const { statusEl } = this._getExportUi();
     const text = `${message}${this._queueSuffix()}`;
+    console.info('[export-ui] status', { text, done, total });
     if (statusEl) statusEl.textContent = text;
     const payload = { status: text };
     if (done != null) payload.done = done;
@@ -5197,7 +5211,7 @@ class UI {
     const exactSeconds = !ecType || ecType === 'loopDuration'
       ? (scenario.loopDuration || (scenario.satisfying ? scenario.loopDuration : scenario.duration) || 12)
       : Math.max(0.5, Number(scenario.endCondition && scenario.endCondition.seconds) || Number(scenario.duration) || 12);
-    return {
+    const job = {
       id: this._nextExportJobId++,
       kind,
       fps,
@@ -5212,16 +5226,36 @@ class UI {
       hasExactFrameTarget,
       tag: scenario.satisfying ? 'loop' : (scenario.name || 'sim').replace(/\s+/g, '_').toLowerCase(),
     };
+    console.info('[export-ui] built export job', {
+      id: job.id,
+      kind: job.kind,
+      fps: job.fps,
+      seed: scenario.seed,
+      scenarioName: scenario.name,
+      tag: job.tag,
+      hintFrames: job.hintFrames,
+      hasExactFrameTarget: job.hasExactFrameTarget,
+      endCondition: scenario.endCondition,
+      objectCount: scenario.objects ? scenario.objects.length : undefined,
+      ruleCount: scenario.events ? scenario.events.length : undefined,
+    });
+    return job;
   }
 
   _ensureExportWorker() {
     if (this._exportWorkerPromise) return;
+    console.info('[export-ui] starting export worker', {
+      queuedJobs: this._exportQueue.length,
+      activeJobId: this._activeExportJob && this._activeExportJob.id,
+    });
     this._exportWorkerPromise = this._processExportQueue()
       .catch((e) => {
+        console.error('[export-ui] export queue failed', e);
         console.error('Export queue failed:', e);
         this._setExportStatus('Export queue failed: ' + (e && e.message ? e.message : String(e)));
       })
       .finally(() => {
+        console.info('[export-ui] export worker finished');
         this._activeExportJob = null;
         this._exportWorkerPromise = null;
         this.app.endExport();
@@ -5232,10 +5266,21 @@ class UI {
   async _processExportQueue() {
     while (this._exportQueue.length > 0) {
       const job = this._exportQueue.shift();
+      console.info('[export-ui] dequeued export job', {
+        id: job.id,
+        kind: job.kind,
+        seed: job.scenario && job.scenario.seed,
+        remainingQueuedJobs: this._exportQueue.length,
+      });
       this._activeExportJob = job;
       this.app.beginExport();
       this._refreshExportControls();
       await this._runExportJob(job);
+      console.info('[export-ui] export job completed or stopped', {
+        id: job.id,
+        kind: job.kind,
+        seed: job.scenario && job.scenario.seed,
+      });
       this.app.endExport();
       this._activeExportJob = null;
       this._refreshExportControls();
@@ -5243,6 +5288,39 @@ class UI {
   }
 
   async _runExportJob(job) {
+    const logWindowError = (event) => {
+      console.error('[export-ui] window error during export job', {
+        id: job.id,
+        kind: job.kind,
+        message: event && event.message,
+        filename: event && event.filename,
+        lineno: event && event.lineno,
+        colno: event && event.colno,
+        errorMessage: event && event.error && event.error.message,
+        errorStack: event && event.error && event.error.stack,
+      });
+    };
+    const logUnhandledRejection = (event) => {
+      const reason = event && event.reason;
+      console.error('[export-ui] unhandled promise rejection during export job', {
+        id: job.id,
+        kind: job.kind,
+        reason: reason && reason.message ? reason.message : String(reason),
+        stack: reason && reason.stack,
+      });
+    };
+    window.addEventListener('error', logWindowError);
+    window.addEventListener('unhandledrejection', logUnhandledRejection);
+    console.info('[export-ui] running export job', {
+      id: job.id,
+      kind: job.kind,
+      fps: job.fps,
+      seed: job.scenario && job.scenario.seed,
+      scenarioName: job.scenario && job.scenario.name,
+      hintFrames: job.hintFrames,
+      visibilityState: document.visibilityState,
+      automaticDownloadsNote: 'If this reaches download click but no file appears, check Chrome downloads and site automatic-download permission.',
+    });
     const ExportManagerCtor = window.ExportManager;
     if (typeof ExportManagerCtor !== 'function') {
       throw new Error('ExportManager failed to load. Refresh the page and retry.');
@@ -5270,6 +5348,7 @@ class UI {
         this._setExportStatus(label, { done: frameCount, total: job.hintFrames });
       };
       if (job.kind === 'mp4') {
+        console.info('[export-ui] starting MP4 exporter', { id: job.id, fps: job.fps });
         result = await exporter.exportMP4({
           fps: job.fps,
           onStatus: (s) => this._setExportStatus(`${this._describeExportJob(job)}: ${s}`),
@@ -5277,6 +5356,7 @@ class UI {
           onProgress: updateProgress,
         });
       } else {
+        console.info('[export-ui] starting PNG frame exporter', { id: job.id, fps: job.fps });
         result = await exporter.exportFrames({
           fps: job.fps,
           onStatus: (s) => this._setExportStatus(`${this._describeExportJob(job)}: ${s}`),
@@ -5287,6 +5367,17 @@ class UI {
 
       const seconds = result.seconds.toFixed(1);
       const filename = `${job.tag}_${job.scenario.seed}_${seconds}s.${result.extension}`;
+      console.info('[export-ui] export result received; starting download', {
+        id: job.id,
+        filename,
+        frames: result.frames,
+        seconds: result.seconds,
+        blobSize: result.blob && result.blob.size,
+        mimeType: result.mimeType,
+        codec: result.codec,
+        audioCodec: result.audioCodec,
+        audioFailReason: result.audioFailReason,
+      });
       this._downloadBlob(result.blob, filename);
 
       let audioTag = '';
@@ -5300,13 +5391,25 @@ class UI {
         `Saved ${filename} (${result.frames} frames · ${seconds}s${audioTag})`,
         { done: result.frames, total: Math.max(result.frames, 1) }
       );
+      console.info('[export-ui] export job saved status set', { id: job.id, filename });
     } catch (e) {
       if (e && e.name === 'ExportCancelledError') {
+        console.warn('[export-ui] export job cancelled', { id: job.id, kind: job.kind });
         this._setExportStatus(`Stopped ${this._describeExportJob(job)}`);
       } else {
+        console.error('[export-ui] export job failed', {
+          id: job.id,
+          kind: job.kind,
+          message: e && e.message ? e.message : String(e),
+          stack: e && e.stack,
+        });
         console.error(e);
         this._setExportStatus(`Export failed: ${e && e.message ? e.message : String(e)}`);
       }
+    } finally {
+      window.removeEventListener('error', logWindowError);
+      window.removeEventListener('unhandledrejection', logUnhandledRejection);
+      console.info('[export-ui] removed temporary export error listeners', { id: job.id, kind: job.kind });
     }
   }
 
