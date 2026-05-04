@@ -2458,13 +2458,29 @@ class Physics {
   }
 
   _clampBallSpeed(ball) {
-    const maxSpeed = Math.max(0, ball && ball.maxSpeed || 0);
-    if (!(maxSpeed > 0)) return;
-    const speed = Math.hypot(ball.vx || 0, ball.vy || 0);
-    if (!(speed > maxSpeed) || speed <= 1e-6) return;
-    const scale = maxSpeed / speed;
-    ball.vx *= scale;
-    ball.vy *= scale;
+    if (!ball) return;
+    let vx = ball.vx || 0;
+    let vy = ball.vy || 0;
+    let speed = Math.hypot(vx, vy);
+    if (!(speed > 1e-6)) return;
+
+    const maxSpeed = Math.max(0, ball.maxSpeed || 0);
+    if (maxSpeed > 0 && speed > maxSpeed) {
+      const scale = maxSpeed / speed;
+      vx *= scale;
+      vy *= scale;
+      speed = maxSpeed;
+    }
+
+    const minSpeed = Math.max(0, ball.minSpeed || 0);
+    if (minSpeed > 0 && speed < minSpeed) {
+      const scale = minSpeed / speed;
+      vx *= scale;
+      vy *= scale;
+    }
+
+    ball.vx = vx;
+    ball.vy = vy;
   }
 
   _physicsSubstepCount(ball, structures, dt) {

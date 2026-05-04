@@ -180,6 +180,24 @@ class UI {
       brightColorsBtn.addEventListener('click', () => this._applyRandomColorCombo(this._randomBrightColorCombos()));
     }
 
+    // Export panel color controls (mirror the outline ones).
+    const exportRandomColorsBtn = document.getElementById('btn-export-random-colors');
+    if (exportRandomColorsBtn) {
+      exportRandomColorsBtn.addEventListener('click', () => this._applyRandomColorCombo());
+    }
+    const exportBrightColorsBtn = document.getElementById('btn-export-bright-colors');
+    if (exportBrightColorsBtn) {
+      exportBrightColorsBtn.addEventListener('click', () => this._applyRandomColorCombo(this._randomBrightColorCombos()));
+    }
+    const exportColorsUndoBtn = document.getElementById('btn-export-colors-undo');
+    if (exportColorsUndoBtn) {
+      exportColorsUndoBtn.addEventListener('click', () => this._undoColorCombo());
+    }
+    const exportColorsRedoBtn = document.getElementById('btn-export-colors-redo');
+    if (exportColorsRedoBtn) {
+      exportColorsRedoBtn.addEventListener('click', () => this._redoColorCombo());
+    }
+
     // Top bar controls.
     document.getElementById('btn-start').addEventListener('click', () => {
       this.refreshAll();
@@ -1329,6 +1347,12 @@ class UI {
   _applyRandomColorCombo(forcedCombos = null) {
     const sc = this.app.simulator.scenario;
     if (!sc || !Array.isArray(sc.objects) || sc.objects.length === 0) return;
+    const snapshot = this._snapshotColorState();
+    if (!snapshot) return;
+    if (!Array.isArray(this._colorHistory)) this._colorHistory = [];
+    this._colorHistory.push(snapshot);
+    // New randomization invalidates any forward-redo chain.
+    this._colorRedoStack = [];
     const combos = Array.isArray(forcedCombos) && forcedCombos.length ? forcedCombos : this._randomColorCombos();
     const palette = combos[(Math.random() * combos.length) | 0];
     let idx = 0;
@@ -1366,6 +1390,76 @@ class UI {
     this.refreshOutline();
     this.refreshPropertyPanel();
     this._commit();
+  }
+
+  _snapshotColorState() {
+    const sc = this.app.simulator.scenario;
+    if (!sc || !Array.isArray(sc.objects) || sc.objects.length === 0) return null;
+    return {
+      objects: sc.objects.map((obj) => obj && typeof obj === 'object' ? {
+        id: obj.id,
+        color: obj.color,
+        gradientColors: Array.isArray(obj.gradientColors) ? obj.gradientColors.slice() : null,
+        textColor: obj.textColor,
+        ballColor: obj.ballColor,
+      } : null),
+    };
+  }
+
+  _applyColorSnapshot(snapshot) {
+    const sc = this.app.simulator.scenario;
+    if (!sc || !Array.isArray(sc.objects) || !snapshot || !Array.isArray(snapshot.objects)) return;
+    const byId = new Map();
+    for (const entry of snapshot.objects) {
+      if (entry && entry.id != null) byId.set(entry.id, entry);
+    }
+    for (const obj of sc.objects) {
+      if (!obj || typeof obj !== 'object' || !obj.id) continue;
+      const saved = byId.get(obj.id);
+      if (!saved) continue;
+      if (saved.color !== undefined) obj.color = saved.color;
+      if (saved.textColor !== undefined && obj.type === 'scoreBin') obj.textColor = saved.textColor;
+      if (saved.ballColor !== undefined && obj.type === 'spawner') obj.ballColor = saved.ballColor;
+      if (saved.gradientColors && Array.isArray(obj.gradientColors)) {
+        obj.gradientColors = saved.gradientColors.slice();
+      }
+      if (this.app.running) this._syncLive(obj);
+    }
+    if (this.app.running) {
+      this._syncLiveBallColorsFromScenario();
+    } else {
+      this.app.simulator.rebuild();
+    }
+    this.refreshOutline();
+    this.refreshPropertyPanel();
+    this._commit();
+  }
+
+  _undoColorCombo() {
+    if (!Array.isArray(this._colorHistory) || this._colorHistory.length === 0) return;
+    const current = this._snapshotColorState();
+    if (current) {
+      if (!Array.isArray(this._colorRedoStack)) this._colorRedoStack = [];
+      this._colorRedoStack.push(current);
+    }
+    const prev = this._colorHistory.pop();
+    this._applyColorSnapshot(prev);
+  }
+
+  _redoColorCombo() {
+    if (!Array.isArray(this._colorRedoStack) || this._colorRedoStack.length === 0) return;
+    const current = this._snapshotColorState();
+    if (current) {
+      if (!Array.isArray(this._colorHistory)) this._colorHistory = [];
+      this._colorHistory.push(current);
+    }
+    const next = this._colorRedoStack.pop();
+    this._applyColorSnapshot(next);
+  }
+
+  _restorePreviousColorCombo() {
+    // Backwards-compat alias: treat as "undo colors".
+    this._undoColorCombo();
   }
 
   _ballBehaviorPresetId(ball) {
@@ -1430,6 +1524,30 @@ class UI {
       this._seedResults = [];
       this._seedResultIndex = -1;
     }
+  }
+
+  _restorePreviousColorCombo() {
+    const sc = this.app.simulator.scenario;
+    const prev = this._previousColorState;
+    if (!sc || !Array.isArray(sc.objects) || !prev || !Array.isArray(prev.objects)) return;
+    const byId = new Map();
+    for (const entry of prev.objects) {
+      if (entry && entry.id != null) byId.set(entry.id, entry);
+    }
+    for (const obj of sc.objects) {
+      if (!obj || typeof obj !== 'object' || !obj.id) continue;
+      const saved = byId.get(obj.id);
+      if (!saved) continue;
+      if (saved.color !== undefined) obj.color = saved.color;
+      if (saved.textColor !== undefined && obj.type === 'scoreBin') obj.textColor = saved.textColor;
+      if (saved.ballColor !== undefined && obj.type === 'spawner') obj.ballColor = saved.ballColor;
+      if (saved.gradientColors && Array.isArray(obj.gradientColors)) {
+        obj.gradientColors = saved.gradientColors.slice();
+      }
+      if (this.app.running) this._syncLive(obj);
+    }
+    this.refreshAll();
+    this._commit();
   }
 
   _refreshActivePresetButton() {

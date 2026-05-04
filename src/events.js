@@ -422,21 +422,41 @@ class EventEngine {
         const exceptLastBall = action.except === 'lastBall';
         const preservedBall = exceptLastBall ? this._pickActionBall(state, 'lastBall') : null;
         const targets = state.objects.filter((o) => o !== preservedBall);
-        const pieces = action.pieces != null ? Math.max(8, action.pieces | 0) : 0;
+        // Default to the "Battle of the Colors" look: lots of tiny shards
+        // raining downward, unless a specific shatter config overrides it.
+        const defaultPieces = 4000;
+        const pieces = action.pieces != null ? Math.max(8, action.pieces | 0) : defaultPieces;
         const perTarget = pieces > 0 && targets.length > 0 ? Math.max(8, Math.round(pieces / targets.length)) : null;
         for (const o of targets) {
-          renderer.shatterObject(o, {
+          const shatterOpts = {
             samples: perTarget,
-            burstScale: action.burstScale != null ? action.burstScale : 1,
-            downwardBias: action.downwardBias != null ? action.downwardBias : 0,
+            burstScale: action.burstScale != null ? action.burstScale : 1.1,
+            downwardBias: action.downwardBias != null ? action.downwardBias : 260,
             lifeBase: action.lifeBase,
             lifeRange: action.lifeRange,
-          });
+          };
+          if (action.rain || action.rain == null) shatterOpts.rain = true;
+          if (action.baseSpeed != null) shatterOpts.baseSpeed = action.baseSpeed;
+          else shatterOpts.baseSpeed = 180;
+          if (action.speedRange != null) shatterOpts.speedRange = action.speedRange;
+          else shatterOpts.speedRange = 420;
+          if (action.sizeMin != null) shatterOpts.sizeMin = action.sizeMin;
+          else shatterOpts.sizeMin = 2;
+          if (action.sizeMax != null) shatterOpts.sizeMax = action.sizeMax;
+          else shatterOpts.sizeMax = 4;
+          renderer.shatterObject(o, shatterOpts);
         }
         state.objects = preservedBall ? [preservedBall] : [];
-        if (action.winnerText) {
+        if (action.winnerText || action.winnerColorMap) {
           const winnerColor = preservedBall && preservedBall.color ? preservedBall.color : '#ffffff';
-          renderer.showPopup(action.winnerText, action.seconds || 2, winnerColor, winnerColor);
+          let text = action.winnerText || 'WINNER';
+          if (preservedBall && preservedBall.color && action.winnerColorMap) {
+            const mapped = action.winnerColorMap[preservedBall.color];
+            if (mapped) text = mapped;
+          }
+          const popupOptions = {};
+          if (action.winnerSize != null) popupOptions.size = action.winnerSize;
+          renderer.showPopup(text, action.seconds || 2, winnerColor, winnerColor, popupOptions);
         }
         // Euphoric win fanfare — this is the moment of resolution.
         if (this.app.audio) this.app.audio.playWinFanfare();

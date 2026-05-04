@@ -78,6 +78,7 @@ function makeBall(overrides = {}) {
     fixed: false,          // if true, ball acts as an immovable obstacle
     ballBehaviorPreset: 'custom',
     maxSpeed: 0,           // 0 = unlimited; otherwise clamp velocity magnitude
+    minSpeed: 0,           // 0 = no floor; otherwise keep at least this fast
     bounce: 1.0,           // restitution on walls
     wallCurve: 0,          // small tangential twist on wall bounces
     wallDrift: 0,          // occasional downward/tangential slip on wall bounces

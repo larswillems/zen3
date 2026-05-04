@@ -477,18 +477,26 @@ class Renderer {
     const downwardBias = opts.downwardBias != null ? opts.downwardBias : 0;
     const lifeBase = opts.lifeBase != null ? opts.lifeBase : 1.4;
     const lifeRange = opts.lifeRange != null ? opts.lifeRange : 1.0;
+    const rain = !!opts.rain;
+    const baseSpeed = opts.baseSpeed != null ? opts.baseSpeed : 300;
+    const speedRange = opts.speedRange != null ? opts.speedRange : 500;
+    const sizeMin = opts.sizeMin != null ? opts.sizeMin : 3;
+    const sizeMax = opts.sizeMax != null ? opts.sizeMax : 5;
+    const sizeSpan = Math.max(0, sizeMax - sizeMin);
     for (const p of outline) {
-      const a = Math.atan2(p.y - (s.y || 960), p.x - (s.x || 540)) + (Math.random() - 0.5);
-      const spd = (300 + Math.random() * 500) * burstScale;
+      const baseAngle = rain
+        ? (Math.PI / 2) + (Math.random() - 0.5) * 0.4
+        : Math.atan2(p.y - (s.y || 960), p.x - (s.x || 540)) + (Math.random() - 0.5);
+      const spd = (baseSpeed + Math.random() * speedRange) * burstScale;
       const life = lifeBase + Math.random() * lifeRange;
       this.particles.push({
         x: p.x, y: p.y,
-        vx: Math.cos(a) * spd,
-        vy: Math.sin(a) * spd + downwardBias,
+        vx: Math.cos(baseAngle) * spd,
+        vy: Math.sin(baseAngle) * spd + downwardBias,
         life,
         maxLife: life,
         color,
-        size: 3 + Math.random() * 5,
+        size: sizeMin + Math.random() * sizeSpan,
       });
     }
     this._trimParticles();
