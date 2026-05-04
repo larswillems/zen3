@@ -4376,6 +4376,16 @@ class UI {
       });
       wrap.appendChild(play);
 
+      const stop = document.createElement('button');
+      stop.type = 'button';
+      stop.className = 'sound-play';
+      stop.textContent = 'Stop';
+      stop.title = 'Stop preview sound';
+      stop.addEventListener('click', () => {
+        if (this.app.audio) this.app.audio.stopPreview();
+      });
+      wrap.appendChild(stop);
+
       const upload = document.createElement('button');
       upload.type = 'button';
       upload.className = 'sound-play';
@@ -4758,6 +4768,15 @@ class UI {
       play.title = 'Preview gap sound';
       play.addEventListener('click', () => this._previewGapPassSound(obj));
       wrap.appendChild(play);
+      const stop = document.createElement('button');
+      stop.type = 'button';
+      stop.className = 'sound-play';
+      stop.textContent = 'Stop';
+      stop.title = 'Stop preview sound';
+      stop.addEventListener('click', () => {
+        if (this.app.audio) this.app.audio.stopPreview();
+      });
+      wrap.appendChild(stop);
       row.appendChild(wrap);
       frag.appendChild(row);
     } else if ((cfg.soundMode || 'none') === 'upload') {
@@ -4796,6 +4815,15 @@ class UI {
       play.disabled = !asset;
       play.addEventListener('click', () => this._previewGapPassSound(obj));
       wrap.appendChild(play);
+
+      const stop = document.createElement('button');
+      stop.type = 'button';
+      stop.textContent = 'Stop';
+      stop.title = 'Stop preview sound';
+      stop.addEventListener('click', () => {
+        if (this.app.audio) this.app.audio.stopPreview();
+      });
+      wrap.appendChild(stop);
 
       const remove = document.createElement('button');
       remove.type = 'button';
@@ -5172,10 +5200,18 @@ class UI {
 
   _pickObject(x, y) {
     const objs = this.app.simulator.scenario.objects;
+    const byId = new Map(objs.map((o) => [o.id, o]));
+    const liveObjs = this.app.simulator.state && Array.isArray(this.app.simulator.state.objects)
+      ? this.app.simulator.state.objects
+      : objs;
     for (let i = objs.length - 1; i >= 0; i--) {
-      const o = objs[i];
+      const live = liveObjs[i] || objs[i];
+      const o = byId.get(live.id) || live;
       if (o.type !== 'ball') continue;
-      if (Math.hypot(x - o.x, y - o.y) <= o.radius + 10) return o;
+      const px = live.x != null ? live.x : o.x;
+      const py = live.y != null ? live.y : o.y;
+      const radius = live.radius != null ? live.radius : o.radius;
+      if (Math.hypot(x - px, y - py) <= radius + 10) return o;
     }
     for (let i = objs.length - 1; i >= 0; i--) {
       const o = objs[i];

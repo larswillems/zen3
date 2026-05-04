@@ -1040,6 +1040,7 @@ class AudioEngine {
   async previewEventSound(kind, name, options = {}) {
     this.ensureReady();
     if (!this._ready) return;
+    this.stopPreview();
     if (typeof name === 'string' && name.startsWith('asset:')) {
       await this._ensureLiveAssetBuffer(name.slice(6));
     }
@@ -1049,6 +1050,11 @@ class AudioEngine {
     const ctx = this.ctx;
     const t0 = ctx.currentTime + 0.03;
     const W = 1080, H = 1920;
+    const bus = ctx.createGain();
+    bus.gain.value = 1;
+    bus.connect(this.master);
+    const preview = { bus, timers: [] };
+    this._preview = preview;
     const ev = { x: W / 2, y: H / 2, type: kind };
     if (kind === 'bounce')  ev.bounceSound  = name || '';
     if (kind === 'escape')  ev.escapeSound  = name || '';
@@ -1062,7 +1068,12 @@ class AudioEngine {
       ev.gapSoundVolume = options.gapSoundVolume != null ? options.gapSoundVolume : 1;
     }
     // Use a fresh throttle map so rapid preview clicks aren't swallowed.
-    this._dispatchEvents(ctx, this.master, t0, [ev], W, H, new Map());
+    this._dispatchEvents(ctx, bus, t0, [ev], W, H, new Map());
+    const maxPreviewSec = options.maxPreviewSec != null ? options.maxPreviewSec : 3.0;
+    preview.timers.push(setTimeout(() => {
+      if (this._preview === preview) this.stopPreview();
+    }, Math.max(0.25, maxPreviewSec) * 1000));
+    return preview;
   }
 
   // Play a melody straight through for editor preview. `onNote(index)` fires
