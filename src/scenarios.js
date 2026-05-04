@@ -1,11 +1,57 @@
 // Scenario I/O: save/load to JSON, duplicate, default scenes.
 
-function saveScenarioToFile(scenario, filename) {
-  const blob = new Blob([JSON.stringify(scenario, null, 2)], { type: 'application/json' });
+function arrayBufferToDataUrl(buffer, mime = 'application/octet-stream') {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return `data:${mime || 'application/octet-stream'};base64,${btoa(binary)}`;
+}
+
+async function scenarioWithEmbeddedSoundAssets(scenario) {
+  const copy = JSON.parse(JSON.stringify(scenario || {}));
+  const assets = copy.soundAssets;
+  if (!assets || typeof assets !== 'object') return copy;
+
+  for (const [assetId, asset] of Object.entries(assets)) {
+    if (!asset || typeof asset !== 'object') continue;
+    if (typeof asset.dataUrl === 'string' && asset.dataUrl.startsWith('data:')) {
+      asset.embedded = true;
+      continue;
+    }
+    if (!asset.url || typeof fetch !== 'function') continue;
+
+    try {
+      const response = await fetch(asset.url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const mime = asset.mime || response.headers.get('content-type') || 'audio/*';
+      asset.dataUrl = arrayBufferToDataUrl(await response.arrayBuffer(), mime);
+      asset.mime = mime;
+      asset.sourceUrl = asset.url;
+      delete asset.url;
+      asset.embedded = true;
+    } catch (e) {
+      console.warn('[scenario-save] Could not embed sound asset; keeping original reference', {
+        assetId,
+        url: asset.url,
+        error: e && e.message ? e.message : String(e),
+      });
+    }
+  }
+
+  return copy;
+}
+
+async function saveScenarioToFile(scenario, filename) {
+  const saveCopy = await scenarioWithEmbeddedSoundAssets(scenario);
+  const blob = new Blob([JSON.stringify(saveCopy, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = filename || `scenario_${scenario.seed}.json`;
+  a.download = filename || `scenario_${saveCopy.seed}.json`;
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();

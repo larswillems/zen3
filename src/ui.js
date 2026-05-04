@@ -408,9 +408,13 @@ class UI {
     }
 
     // Scenario save/load/duplicate.
-    document.getElementById('btn-save').addEventListener('click', () => {
+    document.getElementById('btn-save').addEventListener('click', async () => {
       const sc = this.app.simulator.getScenario();
-      saveScenarioToFile(sc, `scenario_${sc.name || 'scene'}_${sc.seed}.json`.replace(/\s+/g, '_'));
+      try {
+        await saveScenarioToFile(sc, `scenario_${sc.name || 'scene'}_${sc.seed}.json`.replace(/\s+/g, '_'));
+      } catch (e) {
+        alert('Save failed: ' + (e && e.message ? e.message : String(e)));
+      }
     });
     document.getElementById('btn-load').addEventListener('click', async () => {
       try {
@@ -4346,11 +4350,14 @@ class UI {
         input.appendChild(opt);
       }
       input.addEventListener('change', () => {
+        const prevAssetId = this._assetIdFromSoundValue(obj[field.key]);
         obj[field.key] = input.value;
         this._applyEdit(authoredObj);
+        this._removeSoundAssetIfUnused(prevAssetId);
         if (this.app.audio && input.value) {
           this.app.audio.ensureReady();
           this.app.audio.setEnabled(true);
+          this.app.audio.setScenario(this.app.simulator.scenario);
           this.app.audio.previewEventSound(field.kind, input.value);
         }
       });
@@ -4368,6 +4375,40 @@ class UI {
         this.app.audio.previewEventSound(field.kind, input.value);
       });
       wrap.appendChild(play);
+
+      const upload = document.createElement('button');
+      upload.type = 'button';
+      upload.className = 'sound-play';
+      upload.textContent = this._assetIdFromSoundValue(input.value) ? 'Replace' : 'Upload';
+      upload.title = `Upload custom ${field.label.toLowerCase()}`;
+      upload.addEventListener('click', () => {
+        const picker = document.createElement('input');
+        picker.type = 'file';
+        picker.accept = 'audio/*';
+        picker.addEventListener('change', async () => {
+          const file = picker.files && picker.files[0];
+          if (file) await this._uploadBallSoundAsset(obj, authoredObj, field, file);
+        });
+        picker.click();
+      });
+      wrap.appendChild(upload);
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'sound-play';
+      remove.textContent = 'Remove';
+      remove.title = 'Remove custom sound from this property';
+      remove.disabled = !this._assetIdFromSoundValue(input.value);
+      remove.addEventListener('click', () => {
+        const prevAssetId = this._assetIdFromSoundValue(obj[field.key]);
+        obj[field.key] = '';
+        this._applyEdit(authoredObj);
+        this._removeSoundAssetIfUnused(prevAssetId);
+        if (this.app.audio) this.app.audio.setScenario(this.app.simulator.scenario);
+        this.refreshPropertyPanel();
+        this._commit();
+      });
+      wrap.appendChild(remove);
 
       row.appendChild(wrap);
       return row;
@@ -4493,21 +4534,60 @@ class UI {
     return options;
   }
 
-  _scanGapAssetRefs(skipObjectId = null) {
+  _assetIdFromSoundValue(value) {
+    return typeof value === 'string' && value.startsWith('asset:') ? value.slice(6) : '';
+  }
+
+  _scanSoundAssetRefs(skipObjectId = null) {
     const refs = new Map();
     for (const obj of this.app.simulator.scenario.objects || []) {
-      if (!obj || obj.id === skipObjectId || !obj.onGapPass || !obj.onGapPass.soundAssetId) continue;
-      const id = obj.onGapPass.soundAssetId;
-      refs.set(id, (refs.get(id) || 0) + 1);
+      if (!obj || obj.id === skipObjectId) continue;
+      if (obj.onGapPass && obj.onGapPass.soundAssetId) {
+        const id = obj.onGapPass.soundAssetId;
+        refs.set(id, (refs.get(id) || 0) + 1);
+      }
+      for (const key of ['bounceSound', 'escapeSound', 'destroySound', 'deathSound', 'heartSound']) {
+        const id = this._assetIdFromSoundValue(obj[key]);
+        if (id) refs.set(id, (refs.get(id) || 0) + 1);
+      }
+      if (obj.type === 'spawner') {
+        for (const key of ['ballBounceSound', 'ballEscapeSound', 'ballDestroySound', 'ballDeathSound']) {
+          const id = this._assetIdFromSoundValue(obj[key]);
+          if (id) refs.set(id, (refs.get(id) || 0) + 1);
+        }
+      }
     }
     return refs;
   }
 
-  _removeGapAssetIfUnused(assetId, skipObjectId = null) {
+  _removeSoundAssetIfUnused(assetId, skipObjectId = null) {
     if (!assetId) return;
-    const refs = this._scanGapAssetRefs(skipObjectId);
+    const refs = this._scanSoundAssetRefs(skipObjectId);
     if (refs.get(assetId)) return;
     delete this._scenarioSoundAssets()[assetId];
+  }
+
+  _removeGapAssetIfUnused(assetId) {
+    this._removeSoundAssetIfUnused(assetId);
+  }
+
+  async _readAudioFileDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error('Failed to read audio file'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  _addSoundAsset(file, dataUrl) {
+    const assetId = nextId('asset');
+    this._scenarioSoundAssets()[assetId] = {
+      name: file.name || 'uploaded-audio',
+      mime: file.type || 'audio/*',
+      dataUrl,
+    };
+    return assetId;
   }
 
   _makeSimpleSelectRow(labelText, value, options, onChange) {
@@ -4547,24 +4627,32 @@ class UI {
     if (!file) return;
     const cfg = this._ensureGapPassConfig(obj);
     const prevAssetId = cfg.soundAssetId || '';
-    const dataUrl = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(reader.error || new Error('Failed to read audio file'));
-      reader.readAsDataURL(file);
-    });
-    const assetId = nextId('asset');
-    this._scenarioSoundAssets()[assetId] = {
-      name: file.name || 'uploaded-audio',
-      mime: file.type || 'audio/*',
-      dataUrl,
-    };
+    const dataUrl = await this._readAudioFileDataUrl(file);
+    const assetId = this._addSoundAsset(file, dataUrl);
     cfg.soundMode = 'upload';
     cfg.soundAssetId = assetId;
     if (!cfg.soundVolume) cfg.soundVolume = 1;
-    this._removeGapAssetIfUnused(prevAssetId, obj.id);
+    this._removeGapAssetIfUnused(prevAssetId);
     this._applyEdit(obj);
     this.app.audio.setScenario(this.app.simulator.scenario);
+    this.refreshPropertyPanel();
+    this._commit();
+  }
+
+  async _uploadBallSoundAsset(obj, authoredObj, field, file) {
+    if (!file) return;
+    const prevAssetId = this._assetIdFromSoundValue(obj[field.key]);
+    const dataUrl = await this._readAudioFileDataUrl(file);
+    const assetId = this._addSoundAsset(file, dataUrl);
+    obj[field.key] = `asset:${assetId}`;
+    this._applyEdit(authoredObj);
+    this._removeSoundAssetIfUnused(prevAssetId);
+    if (this.app.audio) {
+      this.app.audio.setScenario(this.app.simulator.scenario);
+      this.app.audio.ensureReady();
+      this.app.audio.setEnabled(true);
+      this.app.audio.previewEventSound(field.kind, obj[field.key]);
+    }
     this.refreshPropertyPanel();
     this._commit();
   }

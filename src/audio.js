@@ -932,6 +932,10 @@ class AudioEngine {
           if (!throttle('destroy', 0.05)) break;
           if (this._playConfiguredGapSound(ctx, dest, t0, ev, pan, step)) break;
           const override = ev.destroySound || '';
+          if (String(override).startsWith('asset:')) {
+            this._playUploadedAsset(ctx, dest, t0, String(override).slice(6), pan, 1);
+            break;
+          }
           if (override && this._playPreset('destroy', override, ctx, dest, t0, ev, pan, step)) break;
           const freq = this._midiToFreq(this._pickNote(step - 7));
           this._blip(ctx, dest, t0, freq, {
@@ -1036,6 +1040,9 @@ class AudioEngine {
   async previewEventSound(kind, name, options = {}) {
     this.ensureReady();
     if (!this._ready) return;
+    if (typeof name === 'string' && name.startsWith('asset:')) {
+      await this._ensureLiveAssetBuffer(name.slice(6));
+    }
     if (options.gapSoundMode === 'upload' && options.gapSoundAssetId) {
       await this._ensureLiveAssetBuffer(options.gapSoundAssetId);
     }
@@ -1151,11 +1158,10 @@ class AudioEngine {
     for (const entry of timedEvents) {
       for (const ev of entry.events || []) {
         if (ev && ev.gapSoundMode === 'upload' && ev.gapSoundAssetId) assetIds.add(ev.gapSoundAssetId);
-        if (ev && typeof ev.bounceSound === 'string' && ev.bounceSound.startsWith('asset:')) {
-          assetIds.add(ev.bounceSound.slice(6));
-        }
-        if (ev && typeof ev.deathSound === 'string' && ev.deathSound.startsWith('asset:')) {
-          assetIds.add(ev.deathSound.slice(6));
+        for (const key of ['bounceSound', 'escapeSound', 'destroySound', 'deathSound', 'heartSound']) {
+          if (ev && typeof ev[key] === 'string' && ev[key].startsWith('asset:')) {
+            assetIds.add(ev[key].slice(6));
+          }
         }
       }
     }
